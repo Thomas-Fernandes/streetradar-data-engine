@@ -104,7 +104,7 @@ class ProxyRotatingConnector:
                 connector=self.connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': f'{USER_AGENT_PROXY_PREFIX}-{proxy_index}/{USER_AGENT_VERSION}',
+                    'User-Agent': USER_AGENT_BROWSER,
                     **HTTP_HEADERS
                 }
             )

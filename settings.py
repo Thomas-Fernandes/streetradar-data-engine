@@ -54,10 +54,8 @@ API_CONNECT_TIMEOUT = 5
 # =============================================================================
 # HTTP HEADERS AND USER AGENTS
 # =============================================================================
-# User agent patterns
-USER_AGENT_PROXY_PREFIX = "StreetRadar-Proxy"
-USER_AGENT_MAPY_PREFIX = "StreetRadar-Mapy"
-USER_AGENT_VERSION = "1.0"
+# Standard browser user agent (non-traceable)
+USER_AGENT_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
 # Common HTTP headers
 HTTP_HEADERS = {

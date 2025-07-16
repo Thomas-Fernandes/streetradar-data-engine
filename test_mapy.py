@@ -10,8 +10,11 @@ from typing import Set, Dict, List, Optional, Tuple
 import itertools
 import random
 
+# Import settings
+from settings import *
+
 # Ajout du dossier local streetlevel au path Python
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '.'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), STREETLEVEL_LOCAL_PATH))
 
 # Import depuis les fichiers locaux
 from streetlevel.mapy import find_panorama_async, find_panorama_by_id_async, set_proxy_manager
@@ -31,18 +34,18 @@ class ProxyManager:
     def __init__(self, proxies: List[Tuple]):
         self.proxies = proxies
         self.proxy_cycle = itertools.cycle(proxies)
-        self.proxy_stats = {i: {'requests': 0, 'errors': 0, 'last_used': 0} for i in range(len(proxies))}
+        self.proxy_stats = {i: PROXY_STATS_INIT.copy() for i in range(len(proxies))}
         self.current_proxy_index = 0
         self.lock = asyncio.Lock()
         
-        print(f"🌐 {len(proxies)} proxies chargés")
+        print(f"{EMOJI_GLOBE} {len(proxies)} proxies chargés")
         for i, (ip, port, user, pwd) in enumerate(proxies):
             print(f"   Proxy {i+1}: {ip}:{port}")
     
     def get_proxy_url(self, proxy_tuple: Tuple) -> str:
         """Convertit un tuple proxy en URL"""
         ip, port, user, pwd = proxy_tuple
-        return f"http://{user}:{pwd}@{ip}:{port}"
+        return PROXY_URL_FORMAT.format(user=user, pwd=pwd, ip=ip, port=port)
     
     async def get_next_proxy(self) -> Tuple[int, str]:
         """Retourne le prochain proxy avec rotation"""
@@ -77,7 +80,7 @@ class ProxyManager:
 class ProxyRotatingConnector:
     """Connecteur qui utilise différents proxies pour chaque requête"""
     
-    def __init__(self, proxy_manager: ProxyManager, max_concurrent_per_proxy: int = 120):
+    def __init__(self, proxy_manager: ProxyManager, max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY):
         self.proxy_manager = proxy_manager
         self.max_concurrent_per_proxy = max_concurrent_per_proxy
         self.sessions = {}
@@ -94,16 +97,15 @@ class ProxyRotatingConnector:
     async def create_session_for_proxy(self, proxy_index: int, proxy_url: str) -> aiohttp.ClientSession:
         """Crée une session pour un proxy spécifique"""
         if proxy_index not in self.sessions:
-            timeout = aiohttp.ClientTimeout(total=5, connect=3)
+            timeout = aiohttp.ClientTimeout(total=HTTP_TOTAL_TIMEOUT, connect=HTTP_CONNECT_TIMEOUT)
 
             # Utiliser le connecteur partagé pour toutes les sessions
             self.sessions[proxy_index] = aiohttp.ClientSession(
                 connector=self.connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': f'StreetRadar-Proxy-{proxy_index}/1.0',
-                    'Connection': 'keep-alive',
-                    'Accept-Encoding': 'gzip, deflate'
+                    'User-Agent': f'{USER_AGENT_PROXY_PREFIX}-{proxy_index}/{USER_AGENT_VERSION}',
+                    **HTTP_HEADERS
                 }
             )
         
@@ -137,7 +139,7 @@ class ProxyRotatingConnector:
 class UltraProxyOptimizedCollector:
     """Collecteur avec optimisations proxy pour saturer l'API"""
     
-    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = 120):
+    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY):
         self.output_dir = output_dir
         self.proxy_manager = ProxyManager(proxies)
         
@@ -167,7 +169,7 @@ class UltraProxyOptimizedCollector:
         
         # Batch writer optimisé
         self.batch_data = []
-        self.write_executor = ThreadPoolExecutor(max_workers=1)
+        self.write_executor = ThreadPoolExecutor(max_workers=FILE_WRITER_MAX_WORKERS)
         
         # Métriques de performance
         self.last_progress_time = time.time()
@@ -177,10 +179,10 @@ class UltraProxyOptimizedCollector:
         # Créer le dossier
         os.makedirs(output_dir, exist_ok=True)
         
-        print(f"🚀 COLLECTEUR PROXY ULTRA-OPTIMISÉ")
-        print(f"🌐 {len(proxies)} proxies × {max_concurrent_per_proxy} = {self.total_max_concurrent} connexions simultanées")
-        print(f"📁 Sortie: {output_dir}/")
-        print(f"📦 Utilisation de streetlevel local")
+        print(f"{EMOJI_ROCKET} COLLECTEUR PROXY ULTRA-OPTIMISÉ")
+        print(f"{EMOJI_GLOBE} {len(proxies)} proxies × {max_concurrent_per_proxy} = {self.total_max_concurrent} connexions simultanées")
+        print(f"{EMOJI_FOLDER} Sortie: {output_dir}/")
+        print(f"{EMOJI_PACKAGE} Utilisation de streetlevel local")
     
     async def __aenter__(self):
         return self
@@ -196,7 +198,7 @@ class UltraProxyOptimizedCollector:
         
         # Statistiques finales des proxies
         proxy_stats = self.proxy_manager.get_stats()
-        print(f"\n📊 STATISTIQUES PROXIES:")
+        print(f"\n{EMOJI_CHART} STATISTIQUES PROXIES:")
         print(f"   • Total requêtes: {proxy_stats['total_requests']:,}")
         print(f"   • Taux de succès: {proxy_stats['success_rate']:.1f}%")
         print(f"   • Erreurs: {proxy_stats['total_errors']:,}")
@@ -240,8 +242,8 @@ class UltraProxyOptimizedCollector:
             try:
                 # Appel avec proxy rotatif - timeout agressif
                 pano = await asyncio.wait_for(
-                    find_panorama_by_id_async(panoid, links=True, historical=True),
-                    timeout=4.0
+                    find_panorama_by_id_async(panoid, links=FETCH_LINKS_DEFAULT, historical=FETCH_HISTORICAL_DEFAULT),
+                    timeout=PANORAMA_FETCH_TIMEOUT
                 )
                 self.network_calls += 1
                 return pano
@@ -263,7 +265,8 @@ class UltraProxyOptimizedCollector:
             return
         
         try:
-            filename = f"mapy_proxy_optimized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+            timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
+            filename = OUTPUT_FILENAME_PATTERN.format(timestamp=timestamp)
             filepath = os.path.join(self.output_dir, filename)
             
             table = pa.Table.from_pylist(self.batch_data)
@@ -271,15 +274,15 @@ class UltraProxyOptimizedCollector:
             pq.write_table(
                 table, 
                 filepath, 
-                compression='snappy',
-                use_dictionary=False,
-                write_statistics=False
+                compression=PARQUET_COMPRESSION,
+                use_dictionary=PARQUET_USE_DICTIONARY,
+                write_statistics=PARQUET_WRITE_STATISTICS
             )
             
-            print(f"💾 Dataset final: {len(self.batch_data):,} enregistrements -> {filename}")
+            print(f"{EMOJI_DISK} Dataset final: {len(self.batch_data):,} enregistrements -> {filename}")
             
         except Exception as e:
-            print(f"❌ Erreur écriture finale: {e}")
+            print(f"{EMOJI_ERROR} Erreur écriture finale: {e}")
     
     def print_proxy_metrics(self):
         """Métriques avec informations proxies"""
@@ -301,7 +304,7 @@ class UltraProxyOptimizedCollector:
         proxy_stats = self.proxy_manager.get_stats()
         proxy_efficiency = proxy_stats['total_requests'] / elapsed if elapsed > 0 else 0
         
-        print(f"🚀 {current_count:,} panos | {instant_rate:.0f}/s | {avg_rate:.0f}/s avg | "
+        print(f"{EMOJI_ROCKET} {current_count:,} panos | {instant_rate:.0f}/s | {avg_rate:.0f}/s avg | "
               f"{network_efficiency:.0f} req/s | {success_rate:.1f}% | Queue: {len(self.to_visit):,} | "
               f"Proxies: {proxy_efficiency:.0f} req/s | {elapsed:.0f}s")
         
@@ -310,22 +313,22 @@ class UltraProxyOptimizedCollector:
     
     async def explore_with_proxies(self, start_lat: float, start_lon: float, target_count: int):
         """Exploration avec proxies multiples"""
-        print(f"\n🚀 EXPLORATION AVEC PROXIES MULTIPLES")
-        print(f"📍 Départ: ({start_lat}, {start_lon})")
-        print(f"🎯 Objectif: {target_count:,} panoramas")
-        print(f"🌐 {len(self.proxy_manager.proxies)} proxies simultanés")
-        print(f"⚡ Concurrence TOTALE: {self.total_max_concurrent}")
+        print(f"\n{EMOJI_ROCKET} EXPLORATION AVEC PROXIES MULTIPLES")
+        print(f"{EMOJI_LOCATION} Départ: ({start_lat}, {start_lon})")
+        print(f"{EMOJI_TARGET} Objectif: {target_count:,} panoramas")
+        print(f"{EMOJI_GLOBE} {len(self.proxy_manager.proxies)} proxies simultanés")
+        print(f"{EMOJI_LIGHTNING} Concurrence TOTALE: {self.total_max_concurrent}")
         
         # Panorama de départ
         try:
-            start_pano = await find_panorama_async(start_lat, start_lon, links=True, historical=True)
+            start_pano = await find_panorama_async(start_lat, start_lon, links=FETCH_LINKS_DEFAULT, historical=FETCH_HISTORICAL_DEFAULT)
             self.network_calls += 1
             
             if not start_pano:
-                print("❌ Aucun panorama trouvé!")
+                print(f"{EMOJI_ERROR} Aucun panorama trouvé!")
                 return None
             
-            print(f"✅ Départ: {start_pano.id} ({len(start_pano.links or [])} liens, {len(start_pano.historical or [])} historiques)")
+            print(f"{EMOJI_SUCCESS} Départ: {start_pano.id} ({len(start_pano.links or [])} liens, {len(start_pano.historical or [])} historiques)")
             
             # Initialisation
             self.visited.add(start_pano.id)
@@ -347,10 +350,10 @@ class UltraProxyOptimizedCollector:
                         continue
                         
         except Exception as e:
-            print(f"❌ Erreur démarrage: {e}")
+            print(f"{EMOJI_ERROR} Erreur démarrage: {e}")
             return None
         
-        print(f"\n🌐 BFS AVEC PROXIES MULTIPLES...")
+        print(f"\n{EMOJI_GLOBE} BFS AVEC PROXIES MULTIPLES...")
         
         # Exploration BFS avec proxies
         try:
@@ -358,12 +361,12 @@ class UltraProxyOptimizedCollector:
                 self.bfs_iterations += 1
                 
                 # Métriques fréquentes
-                if self.bfs_iterations % 3 == 0:
+                if self.bfs_iterations % PROGRESS_REPORT_INTERVAL == 0:
                     self.print_proxy_metrics()
                 
                 # Batch ÉNORME pour saturer tous les proxies
                 batch_size = min(
-                    self.total_max_concurrent * 2,  # 2x la capacité théorique
+                    self.total_max_concurrent * BATCH_SIZE_MULTIPLIER,  # 2x la capacité théorique
                     len(self.to_visit),
                     target_count - len(self.visited)
                 )
@@ -405,9 +408,9 @@ class UltraProxyOptimizedCollector:
                                     continue
                     
                     # Nettoyage agressif
-                    if self.bfs_iterations % 50 == 0:
+                    if self.bfs_iterations % CACHE_CLEANUP_INTERVAL == 0:
                         self.processing_cache.clear()
-                        if len(self.failed_cache) > 20000:
+                        if len(self.failed_cache) > FAILED_CACHE_MAX_SIZE:
                             self.failed_cache.clear()
                         gc.collect()
                     
@@ -419,7 +422,7 @@ class UltraProxyOptimizedCollector:
                     break
                     
         except Exception as e:
-            print(f"❌ Erreur exploration: {e}")
+            print(f"{EMOJI_ERROR} Erreur exploration: {e}")
         
         # Finalisation
         end_time = time.time()
@@ -456,22 +459,22 @@ def print_proxy_results(stats: Dict):
     total_minutes = int(stats['total_time'] // 60)
     total_seconds = int(stats['total_time'] % 60)
     
-    print("\n" + "="*80)
-    print("🌐 RÉSULTATS AVEC PROXIES MULTIPLES")
-    print("="*80)
-    print(f"🎯 Panoramas: {stats['total_panoramas']:,}")
+    print(f"\n{PROGRESS_SEPARATOR}")
+    print(f"{EMOJI_GLOBE} RÉSULTATS AVEC PROXIES MULTIPLES")
+    print(PROGRESS_SEPARATOR)
+    print(f"{EMOJI_TARGET} Panoramas: {stats['total_panoramas']:,}")
     print(f"⏱️ Temps: {total_minutes}m {total_seconds}s ({stats['total_time']:.1f}s)")
-    print(f"⚡ Vitesse: {stats['speed']:.1f} panoramas/seconde")
-    print(f"🌐 Proxies: {stats['num_proxies']} proxies")
-    print(f"🔗 Concurrence totale: {stats['total_max_concurrent']:,}")
-    print(f"🔄 Itérations BFS: {stats['bfs_iterations']:,}")
-    print(f"💾 Sortie: {stats['output_dir']}")
+    print(f"{EMOJI_LIGHTNING} Vitesse: {stats['speed']:.1f} panoramas/seconde")
+    print(f"{EMOJI_GLOBE} Proxies: {stats['num_proxies']} proxies")
+    print(f"{EMOJI_LINK} Concurrence totale: {stats['total_max_concurrent']:,}")
+    print(f"{EMOJI_CYCLE} Itérations BFS: {stats['bfs_iterations']:,}")
+    print(f"{EMOJI_DISK} Sortie: {stats['output_dir']}")
     
     # Efficacité des proxies
     proxy_throughput = stats['proxy_requests'] / stats['total_time']
     efficiency = stats['proxy_requests'] / stats['total_panoramas'] if stats['total_panoramas'] > 0 else 0
     
-    print(f"\n📊 EFFICACITÉ PROXIES:")
+    print(f"\n{EMOJI_CHART} EFFICACITÉ PROXIES:")
     print(f"   • Débit proxy total: {proxy_throughput:.1f} requêtes/seconde")
     print(f"   • Requêtes proxy: {stats['proxy_requests']:,}")
     print(f"   • Succès proxy: {stats['proxy_success_rate']:.1f}%")
@@ -479,45 +482,44 @@ def print_proxy_results(stats: Dict):
 
     # Détail par proxy
     if 'proxy_details' in stats:
-        print(f"\n📊 DÉTAIL PAR PROXY:")
+        print(f"\n{EMOJI_CHART} DÉTAIL PAR PROXY:")
         for idx, st in stats['proxy_details'].items():
             print(f"   • Proxy {idx+1}: {st['requests']:,} req | {st['errors']} err")
     
-    print(f"\n📈 PERFORMANCE:")
+    print(f"\n{EMOJI_CHART_UP} PERFORMANCE:")
     print(f"   • Timeouts: {stats['timeouts']} ({stats['timeouts']/stats['network_calls']*100:.1f}%)")
     print(f"   • Erreurs: {stats['errors']} ({stats['errors']/stats['network_calls']*100:.1f}%)")
     print(f"   • Cache échecs: {stats['failed_cache_size']:,}")
     
     # Comparaison
-    original_speed = 82
-    improvement = (stats['speed'] / original_speed - 1) * 100
-    print(f"\n🚀 AMÉLIORATION:")
+    improvement = (stats['speed'] / ORIGINAL_SCRIPT_SPEED - 1) * 100
+    print(f"\n{EMOJI_ROCKET} AMÉLIORATION:")
     print(f"   • vs Script original: +{improvement:.0f}%")
-    print(f"   • Facteur d'accélération: {stats['speed']/original_speed:.1f}x")
+    print(f"   • Facteur d'accélération: {stats['speed']/ORIGINAL_SCRIPT_SPEED:.1f}x")
     
     # Projection théorique
     theoretical_max = proxy_throughput / efficiency if efficiency > 0 else 0
-    print(f"\n🎯 PROJECTION THÉORIQUE:")
+    print(f"\n{EMOJI_TARGET} PROJECTION THÉORIQUE:")
     print(f"   • Avec cette latence API: ~{theoretical_max:.0f} panoramas/seconde")
     print(f"   • Limitation: Bande passante API + latence réseau")
 
 async def main():
     """Version proxy ultra-optimisée"""
     # Configuration avec TOUS les proxies
-    PRAGUE_LAT = 50.0755
-    PRAGUE_LON = 14.4378
-    TARGET_COUNT = 10000  # Augmenté grâce aux proxies
-    MAX_CONCURRENT_PER_PROXY = 300  # Par proxy
-    OUTPUT_DIR = "raw"
+    PRAGUE_LAT = DEFAULT_START_LATITUDE
+    PRAGUE_LON = DEFAULT_START_LONGITUDE
+    TARGET_COUNT = DEFAULT_TARGET_COUNT
+    MAX_CONCURRENT_PER_PROXY = ULTRA_MAX_CONCURRENT_PER_PROXY
+    OUTPUT_DIR = DEFAULT_OUTPUT_DIR
     
-    print("🏭 COLLECTE MAPY.CZ - PROXIES MULTIPLES")
-    print(f"📍 Départ: Prague ({PRAGUE_LAT}, {PRAGUE_LON})")
-    print(f"🎯 Objectif: {TARGET_COUNT:,} panoramas")
-    print(f"🌐 {len(PROXIES)} proxies disponibles")
-    print(f"⚡ {MAX_CONCURRENT_PER_PROXY} connexions par proxy")
-    print(f"🔥 TOTAL: {len(PROXIES) * MAX_CONCURRENT_PER_PROXY:,} connexions simultanées")
-    print(f"📁 Sortie: {OUTPUT_DIR}/")
-    print(f"📊 Collecte des données historiques activée")
+    print(f"{EMOJI_FACTORY} COLLECTE MAPY.CZ - PROXIES MULTIPLES")
+    print(f"{EMOJI_LOCATION} Départ: Prague ({PRAGUE_LAT}, {PRAGUE_LON})")
+    print(f"{EMOJI_TARGET} Objectif: {TARGET_COUNT:,} panoramas")
+    print(f"{EMOJI_GLOBE} {len(PROXIES)} proxies disponibles")
+    print(f"{EMOJI_LIGHTNING} {MAX_CONCURRENT_PER_PROXY} connexions par proxy")
+    print(f"{EMOJI_FIRE} TOTAL: {len(PROXIES) * MAX_CONCURRENT_PER_PROXY:,} connexions simultanées")
+    print(f"{EMOJI_FOLDER} Sortie: {OUTPUT_DIR}/")
+    print(f"{EMOJI_CHART} Collecte des données historiques activée")
     
     try:
         async with UltraProxyOptimizedCollector(OUTPUT_DIR, PROXIES, MAX_CONCURRENT_PER_PROXY) as collector:
@@ -530,17 +532,17 @@ async def main():
         print_proxy_results(stats)
         
         if stats and stats['completed']:
-            print(f"\n🎉 TERMINÉ! {TARGET_COUNT:,} panoramas en {stats['total_time']:.1f}s")
-            print(f"⚡ PERFORMANCE FINALE: {stats['speed']:.1f} panoramas/seconde")
-            print(f"🌐 PROXIES: {stats['num_proxies']} proxies utilisés efficacement")
+            print(f"\n{EMOJI_PARTY} TERMINÉ! {TARGET_COUNT:,} panoramas en {stats['total_time']:.1f}s")
+            print(f"{EMOJI_LIGHTNING} PERFORMANCE FINALE: {stats['speed']:.1f} panoramas/seconde")
+            print(f"{EMOJI_GLOBE} PROXIES: {stats['num_proxies']} proxies utilisés efficacement")
         else:
-            print(f"\n⚠️ Incomplet: {stats['total_panoramas']:,} panoramas")
+            print(f"\n{EMOJI_WARNING} Incomplet: {stats['total_panoramas']:,} panoramas")
         
     except KeyboardInterrupt:
-        print("\n❌ Interrompu")
+        print(f"\n{EMOJI_ERROR} Interrompu")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Erreur: {e}")
+        print(f"\n{EMOJI_ERROR} Erreur: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -550,12 +552,12 @@ if __name__ == "__main__":
     try:
         import uvloop
         uvloop.install()
-        print("🚀 uvloop activé pour performance maximale")
+        print(f"{EMOJI_ROCKET} uvloop activé pour performance maximale")
     except ImportError:
         pass
     
     # Optimisations Python
     import sys
-    sys.setswitchinterval(0.0005)
+    sys.setswitchinterval(SWITCH_INTERVAL)
     
     asyncio.run(main())

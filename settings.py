@@ -73,11 +73,11 @@ MAPY_REFERER = "https://en.mapy.cz/"
 FAILED_CACHE_MAX_SIZE = 20000
 
 # Progress reporting intervals
-PROGRESS_REPORT_INTERVAL = 3  # BFS iterations
-CACHE_CLEANUP_INTERVAL = 50   # BFS iterations
+PROGRESS_REPORT_INTERVAL = 10  # BFS iterations
+CACHE_CLEANUP_INTERVAL = 500   # BFS iterations
 
 # Python optimization
-SWITCH_INTERVAL = 0.0005  # seconds
+SWITCH_INTERVAL = 0.005  # seconds
 
 # =============================================================================
 # FILE OUTPUT SETTINGS

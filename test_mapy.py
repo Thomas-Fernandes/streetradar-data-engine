@@ -9,6 +9,9 @@ from collections import deque
 from typing import Set, Dict, List, Optional, Tuple
 import itertools
 import random
+import pickle
+import shutil
+import signal
 
 # Import settings
 from settings import *
@@ -27,6 +30,244 @@ import gc
 import psutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+class CheckpointManager:
+    """Gestionnaire de checkpoints pour sauvegarde/reprise automatique"""
+    
+    def __init__(self, checkpoint_dir: str = CHECKPOINT_DIR):
+        self.checkpoint_dir = checkpoint_dir
+        self.last_checkpoint_time = time.time()
+        self.last_checkpoint_count = 0
+        
+        # Créer le dossier de checkpoints
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        print(f"{EMOJI_DISK} Système de checkpoints activé: {checkpoint_dir}/")
+    
+    def should_checkpoint(self, current_count: int) -> bool:
+        """Détermine si il faut faire un checkpoint"""
+        if not ENABLE_CHECKPOINTS:
+            return False
+            
+        # Checkpoint basé sur le nombre
+        count_trigger = current_count - self.last_checkpoint_count >= CHECKPOINT_INTERVAL
+        
+        # Checkpoint basé sur le temps
+        time_trigger = time.time() - self.last_checkpoint_time >= CHECKPOINT_TIME_INTERVAL
+        
+        return count_trigger or time_trigger
+    
+    def save_checkpoint(self, collector):
+        """Sauvegarde l'état complet du collecteur"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # État principal
+            state = {
+                'timestamp': timestamp,
+                'total_panoramas': len(collector.visited),
+                'exploration_order': collector.exploration_order,
+                'network_calls': collector.network_calls,
+                'timeouts': collector.timeouts,
+                'errors': collector.errors,
+                'bfs_iterations': collector.bfs_iterations,
+                'start_time': collector.start_time,
+                'total_files_written': collector.total_files_written,
+                'total_records_written': collector.total_records_written,
+                'last_progress_time': collector.last_progress_time,
+                'last_progress_count': collector.last_progress_count
+            }
+            
+            # Sauvegarder l'état principal
+            state_file = os.path.join(self.checkpoint_dir, CHECKPOINT_STATE_FILE)
+            with open(state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            
+            # Sauvegarder les structures de données
+            self._save_pickle_data(CHECKPOINT_VISITED_FILE, set(collector.visited))
+            self._save_pickle_data(CHECKPOINT_TO_VISIT_FILE, list(collector.to_visit))
+            self._save_pickle_data(CHECKPOINT_FAILED_CACHE_FILE, set(collector.failed_cache))
+            
+            # Métadonnées de checkpoint
+            metadata = {
+                'checkpoint_time': time.time(),
+                'checkpoint_timestamp': timestamp,
+                'version': '1.0',
+                'total_panoramas': len(collector.visited),
+                'queue_size': len(collector.to_visit),
+                'failed_cache_size': len(collector.failed_cache)
+            }
+            
+            metadata_file = os.path.join(self.checkpoint_dir, CHECKPOINT_METADATA_FILE)
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            self.last_checkpoint_time = time.time()
+            self.last_checkpoint_count = len(collector.visited)
+            
+            print(f"{EMOJI_SUCCESS} Checkpoint sauvé: {len(collector.visited):,} panoramas")
+            
+            # Rotation des backups
+            self._rotate_backups()
+            
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur sauvegarde checkpoint: {e}")
+    
+    def _save_pickle_data(self, filename: str, data):
+        """Sauvegarde des données avec pickle"""
+        filepath = os.path.join(self.checkpoint_dir, filename)
+        with open(filepath, 'wb') as f:
+            pickle.dump(data, f)
+    
+    def _load_pickle_data(self, filename: str):
+        """Charge des données depuis pickle"""
+        filepath = os.path.join(self.checkpoint_dir, filename)
+        if os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+        return None
+    
+    def has_checkpoint(self) -> bool:
+        """Vérifie si un checkpoint existe"""
+        state_file = os.path.join(self.checkpoint_dir, CHECKPOINT_STATE_FILE)
+        return os.path.exists(state_file)
+    
+    def get_checkpoint_info(self) -> Optional[Dict]:
+        """Récupère les informations du checkpoint"""
+        if not self.has_checkpoint():
+            return None
+            
+        try:
+            # Charger les métadonnées
+            metadata_file = os.path.join(self.checkpoint_dir, CHECKPOINT_METADATA_FILE)
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                return metadata
+            
+            # Fallback sur l'état principal
+            state_file = os.path.join(self.checkpoint_dir, CHECKPOINT_STATE_FILE)
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+            return {
+                'checkpoint_timestamp': state.get('timestamp'),
+                'total_panoramas': state.get('total_panoramas', 0),
+                'checkpoint_time': time.time()
+            }
+            
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur lecture checkpoint: {e}")
+            return None
+    
+    def load_checkpoint(self) -> Optional[Dict]:
+        """Charge l'état complet depuis le checkpoint"""
+        if not self.has_checkpoint():
+            return None
+            
+        try:
+            # Charger l'état principal
+            state_file = os.path.join(self.checkpoint_dir, CHECKPOINT_STATE_FILE)
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+            
+            # Charger les structures de données
+            visited = self._load_pickle_data(CHECKPOINT_VISITED_FILE)
+            to_visit = self._load_pickle_data(CHECKPOINT_TO_VISIT_FILE)
+            failed_cache = self._load_pickle_data(CHECKPOINT_FAILED_CACHE_FILE)
+            
+            if visited is None or to_visit is None:
+                print(f"{EMOJI_ERROR} Données de checkpoint incomplètes")
+                return None
+            
+            return {
+                'state': state,
+                'visited': set(visited),
+                'to_visit': deque(to_visit),
+                'failed_cache': set(failed_cache) if failed_cache else set()
+            }
+            
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur chargement checkpoint: {e}")
+            return None
+    
+    def clear_checkpoint(self):
+        """Supprime les fichiers de checkpoint"""
+        try:
+            files_to_remove = [
+                CHECKPOINT_STATE_FILE,
+                CHECKPOINT_VISITED_FILE, 
+                CHECKPOINT_TO_VISIT_FILE,
+                CHECKPOINT_FAILED_CACHE_FILE,
+                CHECKPOINT_METADATA_FILE
+            ]
+            
+            for filename in files_to_remove:
+                filepath = os.path.join(self.checkpoint_dir, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            
+            print(f"{EMOJI_SUCCESS} Checkpoints nettoyés")
+            
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur nettoyage checkpoints: {e}")
+    
+    def _rotate_backups(self):
+        """Rotation des backups de checkpoint"""
+        try:
+            if CHECKPOINT_BACKUP_COUNT <= 0:
+                return
+                
+            # Créer dossier backup
+            backup_dir = os.path.join(self.checkpoint_dir, "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            # Timestamp pour le backup
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Copier les fichiers principaux
+            files_to_backup = [
+                CHECKPOINT_STATE_FILE,
+                CHECKPOINT_VISITED_FILE,
+                CHECKPOINT_TO_VISIT_FILE,
+                CHECKPOINT_FAILED_CACHE_FILE,
+                CHECKPOINT_METADATA_FILE
+            ]
+            
+            for filename in files_to_backup:
+                src = os.path.join(self.checkpoint_dir, filename)
+                if os.path.exists(src):
+                    dst = os.path.join(backup_dir, f"{timestamp}_{filename}")
+                    shutil.copy2(src, dst)
+            
+            # Supprimer les anciens backups
+            self._cleanup_old_backups(backup_dir)
+            
+        except Exception as e:
+            print(f"{EMOJI_WARNING} Erreur rotation backups: {e}")
+    
+    def _cleanup_old_backups(self, backup_dir: str):
+        """Nettoie les anciens backups"""
+        try:
+            # Lister tous les backups
+            backup_files = []
+            for filename in os.listdir(backup_dir):
+                if filename.endswith(CHECKPOINT_STATE_FILE):
+                    filepath = os.path.join(backup_dir, filename)
+                    timestamp = os.path.getmtime(filepath)
+                    backup_files.append((timestamp, filename.split('_')[0]))
+            
+            # Trier par timestamp (plus récent d'abord)
+            backup_files.sort(reverse=True)
+            
+            # Supprimer les anciens
+            if len(backup_files) > CHECKPOINT_BACKUP_COUNT:
+                for _, prefix in backup_files[CHECKPOINT_BACKUP_COUNT:]:
+                    for filename in os.listdir(backup_dir):
+                        if filename.startswith(prefix):
+                            os.remove(os.path.join(backup_dir, filename))
+            
+        except Exception as e:
+            print(f"{EMOJI_WARNING} Erreur nettoyage backups: {e}")
 
 class ProxyManager:
     """Gestionnaire de proxies avec rotation intelligente"""
@@ -137,9 +378,9 @@ class ProxyRotatingConnector:
         self.sessions.clear()
 
 class UltraProxyOptimizedCollector:
-    """Collecteur avec optimisations proxy pour saturer l'API"""
+    """Collecteur avec optimisations proxy pour saturer l'API + Système de checkpoints"""
     
-    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY):
+    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY, resume_from_checkpoint: bool = False):
         self.output_dir = output_dir
         self.proxy_manager = ProxyManager(proxies)
         
@@ -150,6 +391,10 @@ class UltraProxyOptimizedCollector:
         
         # Calcul de la concurrence totale
         self.total_max_concurrent = len(proxies) * max_concurrent_per_proxy
+        
+        # Système de checkpoints
+        self.checkpoint_manager = CheckpointManager()
+        self.resume_from_checkpoint = resume_from_checkpoint
         
         # Métriques - OPTIMISÉ POUR 50M
         # Utiliser des sets plus efficaces en mémoire
@@ -177,22 +422,107 @@ class UltraProxyOptimizedCollector:
         self.last_progress_count = 0
         self.bfs_iterations = 0
         
+        # Affichage temporel (toutes les 10 secondes)
+        self.last_time_display = time.time()
+        
         # Compteurs pour fichiers multiples
         self.total_files_written = 0
         self.total_records_written = 0
         
+        # Flag pour gestion gracieuse des interruptions
+        self.should_stop = False
+        self._setup_signal_handlers()
+        
         # Créer le dossier
         os.makedirs(output_dir, exist_ok=True)
         
-        print(f"{EMOJI_ROCKET} COLLECTEUR PROXY ULTRA-OPTIMISÉ [50M SAFE]")
+        print(f"{EMOJI_ROCKET} COLLECTEUR PROXY ULTRA-OPTIMISÉ [50M SAFE + CHECKPOINTS]")
         print(f"{EMOJI_GLOBE} {len(proxies)} proxies × {max_concurrent_per_proxy} = {self.total_max_concurrent} connexions simultanées")
         print(f"{EMOJI_FOLDER} Sortie: {output_dir}/")
         print(f"{EMOJI_PACKAGE} Mode 50M panoramas - Écriture par batches de {MEGA_BATCH_SIZE:,}")
+        
+        if ENABLE_CHECKPOINTS:
+            print(f"{EMOJI_DISK} Checkpoints activés: tous les {CHECKPOINT_INTERVAL:,} panoramas")
+
+    def _setup_signal_handlers(self):
+        """Configure les gestionnaires de signaux pour arrêt gracieux"""
+        def signal_handler(signum, frame):
+            print(f"\n{EMOJI_WARNING} Signal {signum} reçu - Arrêt gracieux en cours...")
+            self.should_stop = True
+            
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    async def load_from_checkpoint(self) -> bool:
+        """Charge l'état depuis un checkpoint"""
+        if not self.resume_from_checkpoint:
+            return False
+            
+        checkpoint_data = self.checkpoint_manager.load_checkpoint()
+        if not checkpoint_data:
+            return False
+            
+        try:
+            # Restaurer l'état
+            state = checkpoint_data['state']
+            self.visited = checkpoint_data['visited']
+            self.to_visit = checkpoint_data['to_visit']
+            self.failed_cache = checkpoint_data['failed_cache']
+            
+            # Restaurer les métriques
+            self.exploration_order = state['exploration_order']
+            self.network_calls = state['network_calls']
+            self.timeouts = state['timeouts']
+            self.errors = state['errors']
+            self.bfs_iterations = state['bfs_iterations']
+            self.start_time = state['start_time']
+            self.total_files_written = state['total_files_written']
+            self.total_records_written = state['total_records_written']
+            self.last_progress_time = state['last_progress_time']
+            self.last_progress_count = state['last_progress_count']
+            
+            # Initialiser l'affichage temporel depuis la reprise
+            self.last_time_display = time.time()
+            
+            print(f"{EMOJI_SUCCESS} État restauré depuis checkpoint:")
+            print(f"   • {len(self.visited):,} panoramas déjà collectés")
+            print(f"   • {len(self.to_visit):,} panoramas en attente")
+            print(f"   • {self.total_files_written} fichiers déjà écrits")
+            print(f"   • Reprise depuis l'itération BFS #{self.bfs_iterations}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur chargement checkpoint: {e}")
+            return False
+
+    async def save_checkpoint_if_needed(self):
+        """Sauvegarde un checkpoint si nécessaire"""
+        if self.checkpoint_manager.should_checkpoint(len(self.visited)):
+            await self._save_checkpoint_async()
+
+    async def _save_checkpoint_async(self):
+        """Sauvegarde asynchrone du checkpoint"""
+        try:
+            # Exécuter la sauvegarde dans un thread séparé pour ne pas bloquer
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.write_executor, 
+                self.checkpoint_manager.save_checkpoint, 
+                self
+            )
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur sauvegarde checkpoint: {e}")
     
     async def __aenter__(self):
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Sauvegarde finale avant fermeture
+        if ENABLE_CHECKPOINTS and not self.should_stop:
+            print(f"{EMOJI_DISK} Sauvegarde finale...")
+            await self._save_checkpoint_async()
+        
         await self.proxy_connector.close_all_sessions()
         
         # Écriture finale
@@ -207,7 +537,13 @@ class UltraProxyOptimizedCollector:
         print(f"   • Total requêtes: {proxy_stats['total_requests']:,}")
         print(f"   • Taux de succès: {proxy_stats['success_rate']:.1f}%")
         print(f"   • Erreurs: {proxy_stats['total_errors']:,}")
-    
+        
+        # Nettoyage des checkpoints si terminé avec succès
+        if not self.should_stop and exc_type is None:
+            if ENABLE_CHECKPOINTS:
+                print(f"{EMOJI_SUCCESS} Collecte terminée - Nettoyage des checkpoints")
+                self.checkpoint_manager.clear_checkpoint()
+
     def panorama_to_dict_minimal(self, pano, exploration_order: int) -> Dict:
         """Conversion ultra-minimaliste pour vitesse maximale avec données historiques"""
         historical_data = []
@@ -366,7 +702,7 @@ class UltraProxyOptimizedCollector:
         self.last_progress_count = current_count
     
     async def explore_with_proxies(self, start_lat: float, start_lon: float, target_count: int = None):
-        """Exploration avec proxies multiples - MODE ILLIMITÉ supporté"""
+        """Exploration avec proxies multiples - MODE ILLIMITÉ supporté + CHECKPOINTS"""
         
         # Déterminer le mode
         unlimited_mode = target_count is None or target_count == float('inf') or UNLIMITED_MODE
@@ -384,55 +720,62 @@ class UltraProxyOptimizedCollector:
         print(f"{EMOJI_GLOBE} {len(self.proxy_manager.proxies)} proxies simultanés")
         print(f"{EMOJI_LIGHTNING} Concurrence TOTALE: {self.total_max_concurrent}")
         
+        # Tentative de reprise depuis checkpoint
+        resumed_from_checkpoint = await self.load_from_checkpoint()
+        
         # Variables pour mode illimité
         empty_iterations = 0
-        last_count = 0
+        last_count = len(self.visited) if resumed_from_checkpoint else 0
         empty_queue_start = None
         
-        # Panorama de départ
-        try:
-            start_pano = await find_panorama_async(start_lat, start_lon, links=FETCH_LINKS_DEFAULT, historical=FETCH_HISTORICAL_DEFAULT)
-            self.network_calls += 1
-            
-            if not start_pano:
-                print(f"{EMOJI_ERROR} Aucun panorama trouvé!")
+        # Panorama de départ (seulement si pas de reprise)
+        if not resumed_from_checkpoint:
+            try:
+                start_pano = await find_panorama_async(start_lat, start_lon, links=FETCH_LINKS_DEFAULT, historical=FETCH_HISTORICAL_DEFAULT)
+                self.network_calls += 1
+                
+                if not start_pano:
+                    print(f"{EMOJI_ERROR} Aucun panorama trouvé!")
+                    return None
+                
+                print(f"{EMOJI_SUCCESS} Départ: {start_pano.id} ({len(start_pano.links or [])} liens, {len(start_pano.historical or [])} historiques)")
+                
+                # Initialisation
+                self.visited.add(start_pano.id)
+                self.to_visit.append(start_pano.id)
+                
+                # Enregistrement
+                self.exploration_order += 1
+                record = self.panorama_to_dict_minimal(start_pano, self.exploration_order)
+                self.batch_data.append(record)
+                
+                # Écriture par batch pour éviter l'OOM
+                await self._write_batch_if_needed()
+                
+                # Ajouter les voisins
+                if start_pano.links:
+                    for link in start_pano.links:
+                        try:
+                            if link.pano.id not in self.visited:
+                                self.visited.add(link.pano.id)
+                                self.to_visit.append(link.pano.id)
+                        except:
+                            continue
+                            
+            except Exception as e:
+                print(f"{EMOJI_ERROR} Erreur démarrage: {e}")
                 return None
-            
-            print(f"{EMOJI_SUCCESS} Départ: {start_pano.id} ({len(start_pano.links or [])} liens, {len(start_pano.historical or [])} historiques)")
-            
-            # Initialisation
-            self.visited.add(start_pano.id)
-            self.to_visit.append(start_pano.id)
-            
-            # Enregistrement
-            self.exploration_order += 1
-            record = self.panorama_to_dict_minimal(start_pano, self.exploration_order)
-            self.batch_data.append(record)
-            
-            # Écriture par batch pour éviter l'OOM
-            await self._write_batch_if_needed()
-            
-            # Ajouter les voisins
-            if start_pano.links:
-                for link in start_pano.links:
-                    try:
-                        if link.pano.id not in self.visited:
-                            self.visited.add(link.pano.id)
-                            self.to_visit.append(link.pano.id)
-                    except:
-                        continue
-                        
-        except Exception as e:
-            print(f"{EMOJI_ERROR} Erreur démarrage: {e}")
-            return None
         
         print(f"\n{EMOJI_GLOBE} BFS AVEC PROXIES MULTIPLES...")
         if unlimited_mode:
             print(f"{EMOJI_WARNING} MODE ILLIMITÉ ACTIVÉ - Collecte jusqu'à épuisement des panoramas")
         
+        if resumed_from_checkpoint:
+            print(f"{EMOJI_CYCLE} REPRISE DEPUIS CHECKPOINT - Continuation de la collecte")
+        
         # Exploration BFS avec proxies
         try:
-            while True:  # Boucle modifiée pour le mode illimité
+            while not self.should_stop:  # Vérification d'arrêt gracieux
                 self.bfs_iterations += 1
                 
                 # Vérification des conditions d'arrêt
@@ -473,16 +816,24 @@ class UltraProxyOptimizedCollector:
                     else:
                         break
                 
-                # Métriques fréquentes
+                # Métriques fréquentes (basé sur itérations OU temps)
                 progress_interval = UNLIMITED_PROGRESS_INTERVAL if unlimited_mode else PROGRESS_REPORT_INTERVAL
-                if self.bfs_iterations % progress_interval == 0:
+                current_time = time.time()
+                time_since_display = current_time - self.last_time_display
+                
+                # Afficher si: assez d'itérations OU assez de temps écoulé
+                if (self.bfs_iterations % progress_interval == 0) or (time_since_display >= PROGRESS_TIME_INTERVAL):
                     self.print_proxy_metrics()
+                    self.last_time_display = current_time
                 
                 # Checkpoint spécial pour gros volumes
                 if unlimited_mode and current_count > 0 and current_count % UNLIMITED_CHECKPOINT_INTERVAL == 0:
                     print(f"\n{EMOJI_PARTY} CHECKPOINT: {current_count:,} panoramas collectés!")
                     print(f"{EMOJI_DISK} Fichiers écrits: {self.total_files_written}")
                     print(f"{EMOJI_MEMORY} RAM: {self._get_memory_usage():.0f} MB")
+                
+                # Sauvegarde checkpoint si nécessaire
+                await self.save_checkpoint_if_needed()
                 
                 # Batch pour saturer tous les proxies
                 batch_size = min(
@@ -559,6 +910,12 @@ class UltraProxyOptimizedCollector:
         except Exception as e:
             print(f"{EMOJI_ERROR} Erreur exploration: {e}")
         
+        # Gestion de l'arrêt gracieux
+        if self.should_stop:
+            print(f"{EMOJI_WARNING} Arrêt gracieux demandé")
+            await self._save_checkpoint_async()
+            print(f"{EMOJI_SUCCESS} État sauvé - Reprise possible avec le même script")
+        
         # Finalisation
         end_time = time.time()
         total_time = end_time - self.start_time
@@ -569,6 +926,8 @@ class UltraProxyOptimizedCollector:
         return {
             'test_name': "PROXY_ULTRA_OPTIMIZED_UNLIMITED" if unlimited_mode else "PROXY_ULTRA_OPTIMIZED",
             'unlimited_mode': unlimited_mode,
+            'resumed_from_checkpoint': resumed_from_checkpoint,
+            'graceful_stop': self.should_stop,
             'num_proxies': len(self.proxy_manager.proxies),
             'total_max_concurrent': self.total_max_concurrent,
             'total_panoramas': len(self.visited),
@@ -581,7 +940,7 @@ class UltraProxyOptimizedCollector:
             'proxy_requests': proxy_stats['total_requests'],
             'proxy_success_rate': proxy_stats['success_rate'],
             'proxy_details': proxy_stats['proxy_details'],
-            'completed': unlimited_mode or len(self.visited) >= effective_target,
+            'completed': (unlimited_mode or len(self.visited) >= effective_target) and not self.should_stop,
             'output_dir': self.output_dir,
             'bfs_iterations': self.bfs_iterations,
             'failed_cache_size': len(self.failed_cache),
@@ -599,7 +958,7 @@ class UltraProxyOptimizedCollector:
             return 0.0
 
 def print_proxy_results(stats: Dict):
-    """Résultats avec informations proxies - Support mode illimité"""
+    """Résultats avec informations proxies - Support mode illimité + Checkpoints"""
     if not stats:
         return
     
@@ -628,6 +987,12 @@ def print_proxy_results(stats: Dict):
     print(f"{EMOJI_PACKAGE} Records totaux: {stats.get('total_records_written', 'N/A'):,}")
     print(f"{EMOJI_FOLDER} Sortie: {stats['output_dir']}")
     
+    # Informations sur checkpoint et reprise
+    if stats.get('resumed_from_checkpoint'):
+        print(f"{EMOJI_CYCLE} Session reprise depuis checkpoint")
+    if stats.get('graceful_stop'):
+        print(f"{EMOJI_SUCCESS} Arrêt gracieux - État sauvegardé")
+    
     # Efficacité des proxies
     proxy_throughput = stats['proxy_requests'] / stats['total_time']
     efficiency = stats['proxy_requests'] / stats['total_panoramas'] if stats['total_panoramas'] > 0 else 0
@@ -653,7 +1018,8 @@ def print_proxy_results(stats: Dict):
     if stats.get('unlimited_mode'):
         print(f"\n{EMOJI_TARGET} COUVERTURE TOTALE:")
         print(f"   • Mode: Collecte exhaustive")
-        print(f"   • Statut: {'Terminé' if stats['completed'] else 'Interrompu'}")
+        status = 'Terminé' if stats['completed'] else ('Interrompu' if stats.get('graceful_stop') else 'En cours')
+        print(f"   • Statut: {status}")
         if stats['total_panoramas'] > 1000000:
             print(f"   • Volume: {stats['total_panoramas']/1000000:.1f}M panoramas")
         print(f"   • Territoire: République Tchèque + connexions")
@@ -673,7 +1039,36 @@ def print_proxy_results(stats: Dict):
         print(f"   • Limitation: Bande passante API + latence réseau")
 
 async def main():
-    """Version proxy ultra-optimisée - MODE ILLIMITÉ"""
+    """Version proxy ultra-optimisée - MODE ILLIMITÉ + CHECKPOINTS"""
+    
+    # Détection de checkpoint existant
+    checkpoint_manager = CheckpointManager()
+    
+    # Vérifier s'il y a un checkpoint
+    if checkpoint_manager.has_checkpoint():
+        checkpoint_info = checkpoint_manager.get_checkpoint_info()
+        if checkpoint_info:
+            print(f"\n{EMOJI_CYCLE} CHECKPOINT DÉTECTÉ !")
+            print(f"   • Date: {checkpoint_info.get('checkpoint_timestamp', 'N/A')}")
+            print(f"   • Panoramas collectés: {checkpoint_info.get('total_panoramas', 0):,}")
+            print(f"   • Queue: {checkpoint_info.get('queue_size', 0):,} panoramas en attente")
+            
+            if AUTO_RESUME:
+                if RESUME_PROMPT:
+                    response = input(f"\n{EMOJI_TARGET} Reprendre depuis ce checkpoint ? (o/N): ").lower()
+                    resume_choice = response in ['o', 'oui', 'y', 'yes']
+                else:
+                    resume_choice = True
+                    print(f"{EMOJI_SUCCESS} Reprise automatique activée")
+            else:
+                resume_choice = False
+                print(f"{EMOJI_WARNING} Reprise automatique désactivée - Nouveau démarrage")
+        else:
+            resume_choice = False
+    else:
+        resume_choice = False
+        print(f"{EMOJI_SUCCESS} Nouveau démarrage - Aucun checkpoint détecté")
+    
     # Configuration pour collecte TOTALE
     PRAGUE_LAT = DEFAULT_START_LATITUDE
     PRAGUE_LON = DEFAULT_START_LONGITUDE
@@ -684,7 +1079,7 @@ async def main():
     MAX_CONCURRENT_PER_PROXY = ULTRA_MAX_CONCURRENT_PER_PROXY
     OUTPUT_DIR = DEFAULT_OUTPUT_DIR
     
-    print(f"{EMOJI_FACTORY} COLLECTE MAPY.CZ - MODE ILLIMITÉ")
+    print(f"\n{EMOJI_FACTORY} COLLECTE MAPY.CZ - MODE ILLIMITÉ + CHECKPOINTS")
     print(f"{EMOJI_LOCATION} Départ: Prague ({PRAGUE_LAT}, {PRAGUE_LON})")
     
     if UNLIMITED_MODE:
@@ -700,8 +1095,20 @@ async def main():
     print(f"{EMOJI_CHART} Collecte des données historiques activée")
     print(f"{EMOJI_MEMORY} Optimisations mémoire actives pour gros volumes")
     
+    if ENABLE_CHECKPOINTS:
+        print(f"{EMOJI_DISK} Checkpoints activés: tous les {CHECKPOINT_INTERVAL:,} panoramas")
+        if resume_choice:
+            print(f"{EMOJI_CYCLE} Mode reprise: Continuation depuis checkpoint")
+        else:
+            print(f"{EMOJI_SUCCESS} Mode nouveau: Démarrage depuis zéro")
+    
     try:
-        async with UltraProxyOptimizedCollector(OUTPUT_DIR, PROXIES, MAX_CONCURRENT_PER_PROXY) as collector:
+        async with UltraProxyOptimizedCollector(
+            OUTPUT_DIR, 
+            PROXIES, 
+            MAX_CONCURRENT_PER_PROXY,
+            resume_from_checkpoint=resume_choice
+        ) as collector:
             stats = await collector.explore_with_proxies(
                 start_lat=PRAGUE_LAT,
                 start_lon=PRAGUE_LON,
@@ -711,13 +1118,23 @@ async def main():
         print_proxy_results(stats)
         
         if stats:
-            if stats.get('unlimited_mode'):
+            if stats.get('graceful_stop'):
+                print(f"\n{EMOJI_SUCCESS} ARRÊT GRACIEUX")
+                print(f"{EMOJI_CYCLE} {stats['total_panoramas']:,} panoramas collectés")
+                print(f"{EMOJI_DISK} Checkpoint sauvé pour reprise ultérieure")
+                print(f"\n{EMOJI_TARGET} Pour reprendre: relancez simplement le même script")
+                
+            elif stats.get('unlimited_mode'):
                 print(f"\n{EMOJI_PARTY} COLLECTE TOTALE TERMINÉE!")
                 print(f"{EMOJI_SUCCESS} {stats['total_panoramas']:,} panoramas collectés")
                 print(f"{EMOJI_DISK} {stats['total_files_written']} fichiers écrits ({stats['total_records_written']:,} records)")
                 print(f"{EMOJI_LIGHTNING} PERFORMANCE: {stats['speed']:.1f} panoramas/seconde")
                 print(f"{EMOJI_TIME} Durée totale: {stats['total_time']/3600:.1f} heures")
                 print(f"{EMOJI_GLOBE} Couverture: Exhaustive (tous les panoramas accessibles)")
+                
+                if stats.get('resumed_from_checkpoint'):
+                    print(f"{EMOJI_CYCLE} Cette session a repris depuis un checkpoint")
+                    
             elif stats['completed']:
                 print(f"\n{EMOJI_PARTY} TERMINÉ! {TARGET_COUNT:,} panoramas en {stats['total_time']:.1f}s")
                 print(f"{EMOJI_LIGHTNING} PERFORMANCE FINALE: {stats['speed']:.1f} panoramas/seconde")
@@ -725,11 +1142,14 @@ async def main():
                 print(f"\n{EMOJI_WARNING} Incomplet: {stats['total_panoramas']:,} panoramas")
         
     except KeyboardInterrupt:
-        print(f"\n{EMOJI_ERROR} Interrompu par l'utilisateur")
-        print(f"{EMOJI_DISK} Les données collectées sont sauvegardées dans {OUTPUT_DIR}/")
+        print(f"\n{EMOJI_WARNING} Interruption clavier (Ctrl+C)")
+        print(f"{EMOJI_DISK} État sauvegardé automatiquement")
+        print(f"{EMOJI_CYCLE} Reprise possible: relancez le script")
         sys.exit(1)
     except Exception as e:
         print(f"\n{EMOJI_ERROR} Erreur: {e}")
+        print(f"{EMOJI_DISK} État potentiellement sauvé dans les checkpoints")
+        print(f"{EMOJI_CYCLE} Tentez une reprise: relancez le script")
         import traceback
         traceback.print_exc()
         sys.exit(1)

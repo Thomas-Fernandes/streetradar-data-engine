@@ -75,6 +75,7 @@ FAILED_CACHE_MAX_SIZE = 20000
 # Progress reporting intervals
 PROGRESS_REPORT_INTERVAL = 10  # BFS iterations
 CACHE_CLEANUP_INTERVAL = 500   # BFS iterations
+PROGRESS_TIME_INTERVAL = 10    # seconds - affichage toutes les 10 secondes
 
 # Python optimization
 SWITCH_INTERVAL = 0.005  # seconds
@@ -172,6 +173,29 @@ MEGA_TO_VISIT_KEEP = 2000000   # 2M à garder lors du nettoyage
 
 # Fréquence de nettoyage pour gros volumes
 MEGA_CLEANUP_INTERVAL = 100  # Toutes les 100 itérations BFS
+
+# =============================================================================
+# SYSTÈME DE CHECKPOINT ET REPRISE
+# =============================================================================
+# Activation du système de sauvegarde/reprise
+ENABLE_CHECKPOINTS = True
+
+# Fréquence des checkpoints
+CHECKPOINT_INTERVAL = 10000  # Sauvegarde tous les 10000 panoramas
+CHECKPOINT_TIME_INTERVAL = 300  # Sauvegarde toutes les 5 minutes minimum
+
+# Fichiers de sauvegarde
+CHECKPOINT_DIR = "checkpoints"
+CHECKPOINT_STATE_FILE = "collection_state.json"
+CHECKPOINT_VISITED_FILE = "visited_set.pkl"
+CHECKPOINT_TO_VISIT_FILE = "to_visit_queue.pkl"
+CHECKPOINT_FAILED_CACHE_FILE = "failed_cache.pkl"
+CHECKPOINT_METADATA_FILE = "metadata.json"
+
+# Options de reprise
+AUTO_RESUME = True  # Reprise automatique si checkpoint détecté
+RESUME_PROMPT = False  # Demander confirmation avant reprise
+CHECKPOINT_BACKUP_COUNT = 3  # Garder 3 backups rotatifs
 
 # =============================================================================
 # SYSTEM PATHS

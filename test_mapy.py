@@ -9,9 +9,6 @@ from collections import deque
 from typing import Set, Dict, List, Optional, Tuple
 import itertools
 import random
-import sqlite3
-import threading
-from contextlib import contextmanager
 
 # Import settings
 from settings import *
@@ -30,207 +27,6 @@ import gc
 import psutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
-
-class SQLiteStateManager:
-    """Gestionnaire d'état persistant avec SQLite pour éviter les OOM et permettre la reprise"""
-    
-    def __init__(self, db_path: str = "exploration_state.db"):
-        self.db_path = db_path
-        self.lock = threading.Lock()
-        self._init_database()
-        print(f"{EMOJI_DISK} Base de données d'état: {db_path}")
-    
-    def _init_database(self):
-        """Initialise les tables SQLite"""
-        with self._get_connection() as conn:
-            # Table pour les panoramas visités
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS visited (
-                    pano_id TEXT PRIMARY KEY,
-                    timestamp REAL,
-                    exploration_order INTEGER
-                )
-            """)
-            
-            # Table pour la queue d'exploration
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS queue (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pano_id TEXT UNIQUE,
-                    pano_data TEXT,
-                    priority INTEGER DEFAULT 0,
-                    added_timestamp REAL
-                )
-            """)
-            
-            # Table pour les échecs (cache des IDs qui ont échoué)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS failed (
-                    pano_id TEXT PRIMARY KEY,
-                    timestamp REAL,
-                    retry_count INTEGER DEFAULT 1
-                )
-            """)
-            
-            # Index pour les performances
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_priority ON queue(priority, id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_visited_order ON visited(exploration_order)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_failed_timestamp ON failed(timestamp)")
-            
-            conn.commit()
-    
-    @contextmanager
-    def _get_connection(self):
-        """Context manager pour les connexions SQLite thread-safe"""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")  # Pour la performance
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=10000")
-        try:
-            yield conn
-        finally:
-            conn.close()
-    
-    def is_visited(self, pano_id: str) -> bool:
-        """Vérifie si un panorama a été visité"""
-        with self._get_connection() as conn:
-            cursor = conn.execute("SELECT 1 FROM visited WHERE pano_id = ?", (pano_id,))
-            return cursor.fetchone() is not None
-    
-    def mark_visited(self, pano_id: str, exploration_order: int):
-        """Marque un panorama comme visité"""
-        with self.lock:
-            with self._get_connection() as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO visited (pano_id, timestamp, exploration_order)
-                    VALUES (?, ?, ?)
-                """, (pano_id, time.time(), exploration_order))
-                conn.commit()
-    
-    def add_to_queue(self, panorama_data: List[Dict], priority: int = 0):
-        """Ajoute des panoramas à la queue avec leurs métadonnées complètes (ignore les doublons)"""
-        if not panorama_data:
-            return
-        
-        with self.lock:
-            with self._get_connection() as conn:
-                timestamp = time.time()
-                # Stocker les données complètes en JSON
-                data = [(pano_data['id'], json.dumps(pano_data), priority, timestamp) for pano_data in panorama_data]
-                conn.executemany("""
-                    INSERT OR IGNORE INTO queue (pano_id, pano_data, priority, added_timestamp)
-                    VALUES (?, ?, ?, ?)
-                """, data)
-                conn.commit()
-    
-    def get_batch_from_queue(self, batch_size: int) -> List[Dict]:
-        """Récupère un batch de panoramas de la queue avec leurs données"""
-        with self.lock:
-            with self._get_connection() as conn:
-                cursor = conn.execute("""
-                    SELECT pano_id, pano_data, id FROM queue 
-                    ORDER BY priority DESC, id ASC 
-                    LIMIT ?
-                """, (batch_size,))
-                
-                results = cursor.fetchall()
-                if not results:
-                    return []
-                
-                panorama_data = []
-                queue_ids = []
-                for row in results:
-                    try:
-                        pano_data = json.loads(row[1])
-                        panorama_data.append(pano_data)
-                        queue_ids.append(row[2])
-                    except json.JSONDecodeError:
-                        # Données corrompues, supprimer
-                        queue_ids.append(row[2])
-                
-                # Supprimer les éléments récupérés
-                conn.executemany("DELETE FROM queue WHERE id = ?", [(qid,) for qid in queue_ids])
-                conn.commit()
-                
-                return panorama_data
-    
-    def queue_size(self) -> int:
-        """Retourne la taille de la queue"""
-        with self._get_connection() as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM queue")
-            return cursor.fetchone()[0]
-    
-    def visited_count(self) -> int:
-        """Retourne le nombre de panoramas visités"""
-        with self._get_connection() as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM visited")
-            return cursor.fetchone()[0]
-    
-    def mark_failed(self, pano_id: str):
-        """Marque un panorama comme ayant échoué"""
-        with self.lock:
-            with self._get_connection() as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO failed (pano_id, timestamp, retry_count)
-                    VALUES (?, ?, COALESCE((SELECT retry_count + 1 FROM failed WHERE pano_id = ?), 1))
-                """, (pano_id, time.time(), pano_id))
-                conn.commit()
-    
-    def is_failed(self, pano_id: str, max_retries: int = 3) -> bool:
-        """Vérifie si un panorama a échoué trop de fois"""
-        with self._get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT retry_count FROM failed WHERE pano_id = ?
-            """, (pano_id,))
-            result = cursor.fetchone()
-            return result is not None and result[0] >= max_retries
-    
-    def get_exploration_stats(self) -> Dict:
-        """Retourne les statistiques d'exploration"""
-        with self._get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT 
-                    (SELECT COUNT(*) FROM visited) as visited_count,
-                    (SELECT COUNT(*) FROM queue) as queue_size,
-                    (SELECT COUNT(*) FROM failed) as failed_count,
-                    (SELECT MAX(exploration_order) FROM visited) as max_order
-            """)
-            row = cursor.fetchone()
-            
-            return {
-                'visited_count': row[0] or 0,
-                'queue_size': row[1] or 0,
-                'failed_count': row[2] or 0,
-                'max_exploration_order': row[3] or 0
-            }
-    
-    def cleanup_old_failed(self, days: int = 7):
-        """Nettoie les anciens échecs pour permettre de réessayer"""
-        cutoff_time = time.time() - (days * 24 * 3600)
-        with self.lock:
-            with self._get_connection() as conn:
-                cursor = conn.execute("DELETE FROM failed WHERE timestamp < ?", (cutoff_time,))
-                deleted = cursor.rowcount
-                conn.commit()
-                if deleted > 0:
-                    print(f"{EMOJI_CLEAN} Nettoyage: {deleted} anciens échecs supprimés")
-    
-    def can_resume(self) -> bool:
-        """Vérifie si une exploration peut être reprise"""
-        stats = self.get_exploration_stats()
-        return stats['visited_count'] > 0 or stats['queue_size'] > 0
-    
-    def print_resume_info(self):
-        """Affiche les informations de reprise"""
-        stats = self.get_exploration_stats()
-        if stats['visited_count'] > 0:
-            print(f"{EMOJI_CYCLE} REPRISE DÉTECTÉE:")
-            print(f"   • Panoramas déjà visités: {stats['visited_count']:,}")
-            print(f"   • Queue restante: {stats['queue_size']:,}")
-            print(f"   • Échecs enregistrés: {stats['failed_count']:,}")
-            print(f"   • Dernier ordre d'exploration: {stats['max_exploration_order']:,}")
-            return True
-        return False
 
 class ProxyManager:
     """Gestionnaire de proxies avec rotation intelligente"""
@@ -341,9 +137,9 @@ class ProxyRotatingConnector:
         self.sessions.clear()
 
 class UltraProxyOptimizedCollector:
-    """Collecteur avec optimisations proxy pour saturer l'API + persistance SQLite"""
+    """Collecteur avec optimisations proxy pour saturer l'API"""
     
-    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY, db_path: str = "exploration_state.db"):
+    def __init__(self, output_dir: str, proxies: List[Tuple], max_concurrent_per_proxy: int = DEFAULT_MAX_CONCURRENT_PER_PROXY):
         self.output_dir = output_dir
         self.proxy_manager = ProxyManager(proxies)
         
@@ -355,22 +151,24 @@ class UltraProxyOptimizedCollector:
         # Calcul de la concurrence totale
         self.total_max_concurrent = len(proxies) * max_concurrent_per_proxy
         
-        # Gestionnaire d'état persistant SQLite
-        self.state_manager = SQLiteStateManager(db_path)
-        
-        # Métriques (gardées en mémoire pour performance)
+        # Métriques - OPTIMISÉ POUR 50M
+        # Utiliser des sets plus efficaces en mémoire
+        self.visited: Set[int] = set()  # int au lieu de str
+        self.to_visit: deque = deque()
         self.network_calls = 0
         self.timeouts = 0
         self.errors = 0
+        self.exploration_order = 0
         self.start_time = time.time()
         
         # Optimisations
         self.semaphore = asyncio.Semaphore(self.total_max_concurrent)
         
-        # Cache temporaire en mémoire pour déduplication dans le batch actuel
-        self.processing_cache: Set[str] = set()
+        # Cache et déduplication - LIMITÉS EN TAILLE
+        self.processing_cache: Set[int] = set()  # int au lieu de str
+        self.failed_cache: Set[int] = set()  # int au lieu de str
         
-        # Batch writer optimisé
+        # Batch writer optimisé - TAILLE RÉDUITE
         self.batch_data = []
         self.write_executor = ThreadPoolExecutor(max_workers=FILE_WRITER_MAX_WORKERS)
         
@@ -379,44 +177,17 @@ class UltraProxyOptimizedCollector:
         self.last_progress_count = 0
         self.bfs_iterations = 0
         
+        # Compteurs pour fichiers multiples
+        self.total_files_written = 0
+        self.total_records_written = 0
+        
         # Créer le dossier
         os.makedirs(output_dir, exist_ok=True)
         
-        print(f"{EMOJI_ROCKET} COLLECTEUR PROXY ULTRA-OPTIMISÉ + SQLITE")
+        print(f"{EMOJI_ROCKET} COLLECTEUR PROXY ULTRA-OPTIMISÉ [50M SAFE]")
         print(f"{EMOJI_GLOBE} {len(proxies)} proxies × {max_concurrent_per_proxy} = {self.total_max_concurrent} connexions simultanées")
         print(f"{EMOJI_FOLDER} Sortie: {output_dir}/")
-        print(f"{EMOJI_DISK} Base de données: {db_path}")
-        print(f"{EMOJI_PACKAGE} Utilisation de streetlevel local")
-    
-    def link_to_dict(self, link) -> Dict:
-        """Convertit un objet Link en dictionnaire pour stockage JSON"""
-        return {
-            'id': link.pano.id,
-            'lat': link.pano.lat,
-            'lon': link.pano.lon,
-            'date': link.pano.date.isoformat() if hasattr(link.pano.date, 'isoformat') else str(link.pano.date),
-            'provider': link.pano.provider,
-            'elevation': link.pano.elevation,
-            'direction': link.direction
-        }
-    
-    def dict_to_panorama_minimal(self, pano_dict: Dict, exploration_order: int) -> Dict:
-        """Convertit un dictionnaire en enregistrement minimal pour Parquet"""
-        return {
-            "id": pano_dict['id'],
-            "lat": pano_dict['lat'],
-            "lon": pano_dict['lon'],
-            "date": pano_dict['date'],
-            "provider": pano_dict['provider'],
-            "elevation": pano_dict['elevation'],
-            "permalink": f"https://en.mapy.cz/zakladni?pano=1&pid={pano_dict['id']}&x={pano_dict['lon']}&y={pano_dict['lat']}&z=17&ovl=8",
-            "order": exploration_order,
-            "links": 0,  # Sera mis à jour après récupération des liens
-            "link_ids": [],  # Sera mis à jour après récupération des liens
-            "historical_count": 0,  # Les données historiques ne sont pas dans les liens
-            "historical": [],
-            "time": time.time()
-        }
+        print(f"{EMOJI_PACKAGE} Mode 50M panoramas - Écriture par batches de {MEGA_BATCH_SIZE:,}")
     
     async def __aenter__(self):
         return self
@@ -426,18 +197,16 @@ class UltraProxyOptimizedCollector:
         
         # Écriture finale
         if self.batch_data:
-            await self._write_final_batch()
+            await self._write_batch_if_needed(force=True)
         
         self.write_executor.shutdown(wait=True)
         
         # Statistiques finales des proxies
         proxy_stats = self.proxy_manager.get_stats()
-        state_stats = self.state_manager.get_exploration_stats()
-        print(f"\n{EMOJI_CHART} STATISTIQUES FINALES:")
-        print(f"   • Total requêtes proxy: {proxy_stats['total_requests']:,}")
+        print(f"\n{EMOJI_CHART} STATISTIQUES PROXIES:")
+        print(f"   • Total requêtes: {proxy_stats['total_requests']:,}")
         print(f"   • Taux de succès: {proxy_stats['success_rate']:.1f}%")
-        print(f"   • Panoramas en base: {state_stats['visited_count']:,}")
-        print(f"   • Queue restante: {state_stats['queue_size']:,}")
+        print(f"   • Erreurs: {proxy_stats['total_errors']:,}")
     
     def panorama_to_dict_minimal(self, pano, exploration_order: int) -> Dict:
         """Conversion ultra-minimaliste pour vitesse maximale avec données historiques"""
@@ -468,12 +237,8 @@ class UltraProxyOptimizedCollector:
         }
     
     async def fetch_panorama_with_proxy(self, panoid: str):
-        """Récupération avec proxies rotatifs + vérification SQLite"""
-        # Vérifications rapides
-        if panoid in self.processing_cache:
-            return None
-        
-        if self.state_manager.is_visited(panoid) or self.state_manager.is_failed(panoid):
+        """Récupération avec proxies rotatifs"""
+        if panoid in self.processing_cache or panoid in self.failed_cache:
             return None
         
         self.processing_cache.add(panoid)
@@ -486,21 +251,15 @@ class UltraProxyOptimizedCollector:
                     timeout=PANORAMA_FETCH_TIMEOUT
                 )
                 self.network_calls += 1
-                
-                # Si l'API retourne None (panorama inexistant), marquer comme failed
-                if pano is None:
-                    self.state_manager.mark_failed(panoid)
-                    return None
-                
                 return pano
                 
             except asyncio.TimeoutError:
                 self.timeouts += 1
-                self.state_manager.mark_failed(panoid)
+                self.failed_cache.add(panoid)
                 return None
             except Exception as e:
                 self.errors += 1
-                self.state_manager.mark_failed(panoid)
+                self.failed_cache.add(panoid)
                 return None
             finally:
                 self.processing_cache.discard(panoid)
@@ -530,15 +289,50 @@ class UltraProxyOptimizedCollector:
         except Exception as e:
             print(f"{EMOJI_ERROR} Erreur écriture finale: {e}")
     
+    async def _write_batch_if_needed(self, force=False):
+        """Écrit le batch si nécessaire pour éviter l'OOM"""
+        # Écrire tous les 10k panoramas ou si forcé
+        BATCH_SIZE = MEGA_BATCH_SIZE
+        
+        if len(self.batch_data) >= BATCH_SIZE or force:
+            if self.batch_data:
+                timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
+                filename = f"mapy_batch_{timestamp}_{len(self.batch_data)}.parquet"
+                filepath = os.path.join(self.output_dir, filename)
+                
+                # Écriture asynchrone
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(self.write_executor, self._write_batch_sync, filepath, self.batch_data.copy())
+                
+                print(f"{EMOJI_DISK} Batch écrit: {len(self.batch_data):,} → {filename}")
+                
+                # Compteurs globaux
+                self.total_files_written += 1
+                self.total_records_written += len(self.batch_data)
+                
+                # Libérer la mémoire
+                self.batch_data.clear()
+                gc.collect()
+
+    def _write_batch_sync(self, filepath: str, data: List[Dict]):
+        """Écriture synchrone du batch"""
+        try:
+            table = pa.Table.from_pylist(data)
+            pq.write_table(
+                table, 
+                filepath,
+                compression=PARQUET_COMPRESSION,
+                use_dictionary=PARQUET_USE_DICTIONARY,
+                write_statistics=PARQUET_WRITE_STATISTICS
+            )
+        except Exception as e:
+            print(f"{EMOJI_ERROR} Erreur écriture batch: {e}")
+    
     def print_proxy_metrics(self):
-        """Métriques avec informations proxies + SQLite"""
+        """Métriques avec informations proxies"""
         current_time = time.time()
         elapsed = current_time - self.start_time
-        
-        # Statistiques depuis SQLite
-        state_stats = self.state_manager.get_exploration_stats()
-        current_count = state_stats['visited_count']
-        queue_size = state_stats['queue_size']
+        current_count = len(self.visited)
         
         # Vitesses
         time_diff = current_time - self.last_progress_time
@@ -554,213 +348,214 @@ class UltraProxyOptimizedCollector:
         proxy_stats = self.proxy_manager.get_stats()
         proxy_efficiency = proxy_stats['total_requests'] / elapsed if elapsed > 0 else 0
         
+        # Métriques mémoire
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            memory_info = f" | RAM: {memory_mb:.0f}MB"
+        except:
+            memory_info = ""
+        
         print(f"{EMOJI_ROCKET} {current_count:,} panos | {instant_rate:.0f}/s | {avg_rate:.0f}/s avg | "
-              f"{network_efficiency:.0f} req/s | {success_rate:.1f}% | Queue: {queue_size:,} | "
-              f"Proxies: {proxy_efficiency:.0f} req/s | {elapsed:.0f}s")
+              f"{network_efficiency:.0f} req/s | {success_rate:.1f}% | Queue: {len(self.to_visit):,} | "
+              f"Batch: {len(self.batch_data)}/{MEGA_BATCH_SIZE} | Files: {self.total_files_written} | "
+              f"Proxies: {proxy_efficiency:.0f} req/s | {elapsed:.0f}s{memory_info}")
         
         self.last_progress_time = current_time
         self.last_progress_count = current_count
     
-    def initialize_or_resume(self, start_lat: float, start_lon: float) -> Optional[Dict]:
-        """Initialise l'exploration ou reprend depuis SQLite"""
-        # Vérifier s'il y a quelque chose à reprendre
-        if self.state_manager.can_resume():
-            self.state_manager.print_resume_info()
-            
-            # Nettoyer les anciens échecs pour permettre des re-tentatives
-            self.state_manager.cleanup_old_failed()
-            
-            # Récupérer les statistiques actuelles
-            state_stats = self.state_manager.get_exploration_stats()
-            if state_stats['max_exploration_order'] > 0:
-                self.exploration_order = state_stats['max_exploration_order']
-            else:
-                self.exploration_order = 0
-            
-            print(f"{EMOJI_SUCCESS} Reprise de l'exploration depuis l'ordre {self.exploration_order}")
-            return True
+    async def explore_with_proxies(self, start_lat: float, start_lon: float, target_count: int = None):
+        """Exploration avec proxies multiples - MODE ILLIMITÉ supporté"""
         
-        # Nouvelle exploration
-        print(f"{EMOJI_NEW} Nouvelle exploration depuis ({start_lat}, {start_lon})")
-        return False
-    
-    async def start_new_exploration(self, start_lat: float, start_lon: float) -> bool:
-        """Démarre une nouvelle exploration depuis les coordonnées"""
+        # Déterminer le mode
+        unlimited_mode = target_count is None or target_count == float('inf') or UNLIMITED_MODE
+        effective_target = float('inf') if unlimited_mode else target_count
+        
+        print(f"\n{EMOJI_ROCKET} EXPLORATION AVEC PROXIES MULTIPLES")
+        print(f"{EMOJI_LOCATION} Départ: ({start_lat}, {start_lon})")
+        
+        if unlimited_mode:
+            print(f"{EMOJI_TARGET} Objectif: COLLECTE TOTALE (tous les panoramas existants)")
+            print(f"{EMOJI_WARNING} Critères d'arrêt: {UNLIMITED_STOP_EMPTY_ITERATIONS} itérations vides OU queue vide {UNLIMITED_STOP_EMPTY_QUEUE_TIME}s")
+        else:
+            print(f"{EMOJI_TARGET} Objectif: {target_count:,} panoramas")
+            
+        print(f"{EMOJI_GLOBE} {len(self.proxy_manager.proxies)} proxies simultanés")
+        print(f"{EMOJI_LIGHTNING} Concurrence TOTALE: {self.total_max_concurrent}")
+        
+        # Variables pour mode illimité
+        empty_iterations = 0
+        last_count = 0
+        empty_queue_start = None
+        
+        # Panorama de départ
         try:
             start_pano = await find_panorama_async(start_lat, start_lon, links=FETCH_LINKS_DEFAULT, historical=FETCH_HISTORICAL_DEFAULT)
             self.network_calls += 1
             
             if not start_pano:
                 print(f"{EMOJI_ERROR} Aucun panorama trouvé!")
-                return False
+                return None
             
             print(f"{EMOJI_SUCCESS} Départ: {start_pano.id} ({len(start_pano.links or [])} liens, {len(start_pano.historical or [])} historiques)")
             
-            # Initialisation de l'ordre d'exploration
-            self.exploration_order = 1
+            # Initialisation
+            self.visited.add(start_pano.id)
+            self.to_visit.append(start_pano.id)
             
-            # Marquer comme visité dans SQLite
-            self.state_manager.mark_visited(start_pano.id, self.exploration_order)
-            
-            # Enregistrement en Parquet
+            # Enregistrement
+            self.exploration_order += 1
             record = self.panorama_to_dict_minimal(start_pano, self.exploration_order)
             self.batch_data.append(record)
             
-            # Ajouter les voisins à la queue SQLite
+            # Écriture par batch pour éviter l'OOM
+            await self._write_batch_if_needed()
+            
+            # Ajouter les voisins
             if start_pano.links:
-                link_data = []
                 for link in start_pano.links:
                     try:
-                        if not self.state_manager.is_visited(link.pano.id) and not self.state_manager.is_failed(link.pano.id):
-                            link_dict = self.link_to_dict(link)
-                            link_data.append(link_dict)
+                        if link.pano.id not in self.visited:
+                            self.visited.add(link.pano.id)
+                            self.to_visit.append(link.pano.id)
                     except:
                         continue
-                
-                if link_data:
-                    self.state_manager.add_to_queue(link_data)
-                    print(f"{EMOJI_PLUS} {len(link_data)} nouveaux panoramas ajoutés à la queue")
-            
-            return True
-            
+                        
         except Exception as e:
             print(f"{EMOJI_ERROR} Erreur démarrage: {e}")
-            return False
-    
-    async def explore_with_proxies(self, start_lat: float, start_lon: float, target_count: Optional[int] = None):
-        """Exploration avec proxies multiples + SQLite - exploration complète par défaut ou limitée pour tests"""
-        print(f"\n{EMOJI_ROCKET} EXPLORATION AVEC PROXIES MULTIPLES + SQLITE")
-        print(f"{EMOJI_LOCATION} Départ: ({start_lat}, {start_lon})")
+            return None
         
-        if target_count is not None:
-            print(f"{EMOJI_TARGET} Mode test - Limite: {target_count:,} panoramas")
-        else:
-            print(f"{EMOJI_TARGET} Mode complet - Exploration jusqu'à épuisement")
-            
-        print(f"{EMOJI_GLOBE} {len(self.proxy_manager.proxies)} proxies simultanés")
-        print(f"{EMOJI_LIGHTNING} Concurrence TOTALE: {self.total_max_concurrent}")
+        print(f"\n{EMOJI_GLOBE} BFS AVEC PROXIES MULTIPLES...")
+        if unlimited_mode:
+            print(f"{EMOJI_WARNING} MODE ILLIMITÉ ACTIVÉ - Collecte jusqu'à épuisement des panoramas")
         
-        # Initialisation ou reprise
-        is_resume = self.initialize_or_resume(start_lat, start_lon)
-        
-        if not is_resume:
-            # Nouvelle exploration
-            if not await self.start_new_exploration(start_lat, start_lon):
-                return None
-        else:
-            # Récupérer l'ordre d'exploration actuel
-            state_stats = self.state_manager.get_exploration_stats()
-            self.exploration_order = state_stats['max_exploration_order']
-        
-        print(f"\n{EMOJI_GLOBE} BFS AVEC PROXIES MULTIPLES + SQLITE...")
-        
-        # Exploration BFS avec SQLite
+        # Exploration BFS avec proxies
         try:
-            while True:
-                # Vérifier les conditions d'arrêt
-                state_stats = self.state_manager.get_exploration_stats()
-                current_visited = state_stats['visited_count']
-                current_queue_size = state_stats['queue_size']
-                
-                # Vérifier la limite seulement si elle est définie
-                if target_count is not None and current_visited >= target_count:
-                    print(f"{EMOJI_SUCCESS} Limite de test atteinte: {target_count:,} panoramas")
-                    break
-                
-                # Plus rien à explorer
-                if current_queue_size == 0:
-                    if target_count is None:
-                        print(f"{EMOJI_SUCCESS} Exploration complète terminée - Plus de panoramas à explorer")
-                    else:
-                        print(f"{EMOJI_WARNING} Queue vide avant d'atteindre la limite")
-                    break
-                
+            while True:  # Boucle modifiée pour le mode illimité
                 self.bfs_iterations += 1
                 
-                # Métriques fréquentes
-                if self.bfs_iterations % PROGRESS_REPORT_INTERVAL == 0:
-                    self.print_proxy_metrics()
+                # Vérification des conditions d'arrêt
+                current_count = len(self.visited)
                 
-                # Calcul dynamique de la taille du batch
-                remaining_slots = None
-                if target_count is not None:
-                    remaining_slots = target_count - current_visited
-                
-                batch_size = min(
-                    self.total_max_concurrent * BATCH_SIZE_MULTIPLIER,  # 2x la capacité théorique
-                    current_queue_size,
-                    remaining_slots if remaining_slots is not None else float('inf')
-                )
-                
-                # Récupérer un batch depuis SQLite
-                current_batch = self.state_manager.get_batch_from_queue(int(batch_size))
-                
-                if not current_batch:
+                # Mode limité : arrêt classique
+                if not unlimited_mode and current_count >= effective_target:
+                    print(f"{EMOJI_SUCCESS} Objectif atteint: {current_count:,} panoramas")
                     break
                 
-                # Traitement direct des données sans appels API supplémentaires
+                # Mode illimité : vérifications spéciales
+                if unlimited_mode:
+                    # Pas de nouveaux panoramas depuis plusieurs itérations
+                    if current_count == last_count:
+                        empty_iterations += 1
+                        if empty_iterations >= UNLIMITED_STOP_EMPTY_ITERATIONS:
+                            print(f"{EMOJI_WARNING} Arrêt: {UNLIMITED_STOP_EMPTY_ITERATIONS} itérations sans nouveaux panoramas")
+                            break
+                    else:
+                        empty_iterations = 0
+                        last_count = current_count
+                    
+                    # Queue vide pendant trop longtemps
+                    if not self.to_visit:
+                        if empty_queue_start is None:
+                            empty_queue_start = time.time()
+                            print(f"{EMOJI_WARNING} Queue vide - Attente de nouveaux panoramas...")
+                        elif time.time() - empty_queue_start > UNLIMITED_STOP_EMPTY_QUEUE_TIME:
+                            print(f"{EMOJI_SUCCESS} Arrêt: Plus de panoramas à explorer (queue vide {UNLIMITED_STOP_EMPTY_QUEUE_TIME}s)")
+                            break
+                    else:
+                        empty_queue_start = None
+                
+                # Sortir si plus rien à explorer
+                if not self.to_visit:
+                    if unlimited_mode:
+                        continue  # Attendre un peu plus en mode illimité
+                    else:
+                        break
+                
+                # Métriques fréquentes
+                progress_interval = UNLIMITED_PROGRESS_INTERVAL if unlimited_mode else PROGRESS_REPORT_INTERVAL
+                if self.bfs_iterations % progress_interval == 0:
+                    self.print_proxy_metrics()
+                
+                # Checkpoint spécial pour gros volumes
+                if unlimited_mode and current_count > 0 and current_count % UNLIMITED_CHECKPOINT_INTERVAL == 0:
+                    print(f"\n{EMOJI_PARTY} CHECKPOINT: {current_count:,} panoramas collectés!")
+                    print(f"{EMOJI_DISK} Fichiers écrits: {self.total_files_written}")
+                    print(f"{EMOJI_MEMORY} RAM: {self._get_memory_usage():.0f} MB")
+                
+                # Batch pour saturer tous les proxies
+                batch_size = min(
+                    self.total_max_concurrent * BATCH_SIZE_MULTIPLIER,  # 2x la capacité théorique
+                    len(self.to_visit),
+                    max(1000, len(self.to_visit))  # Pas de limite en mode illimité
+                )
+                
+                current_batch = []
+                for _ in range(batch_size):
+                    if self.to_visit:
+                        current_batch.append(self.to_visit.popleft())
+                
+                if not current_batch:
+                    continue
+                
+                # Randomiser l'ordre pour équilibrer la charge
+                random.shuffle(current_batch)
+                
+                # Lancement MASSIF avec proxies rotatifs
                 try:
-                    new_links = []
-                    successful_panos = 0
+                    tasks = [self.fetch_panorama_with_proxy(panoid) for panoid in current_batch]
+                    panoramas = await asyncio.gather(*tasks, return_exceptions=True)
                     
-                    for pano_dict in current_batch:
-                        try:
-                            pano_id = pano_dict['id']
-                            
-                            # Vérifier si déjà traité
-                            if self.state_manager.is_visited(pano_id) or self.state_manager.is_failed(pano_id):
-                                continue
-                            
-                            # Vérifier la limite avant d'ajouter
-                            current_visited = self.state_manager.visited_count()
-                            if target_count is not None and current_visited >= target_count:
-                                break
-                            
-                            successful_panos += 1
-                            
-                            # Ajout ultra-rapide
-                            self.exploration_order += 1
-                            
-                            # Marquer comme visité dans SQLite
-                            self.state_manager.mark_visited(pano_id, self.exploration_order)
-                            
-                            # Enregistrer en Parquet
-                            record = self.dict_to_panorama_minimal(pano_dict, self.exploration_order)
-                            self.batch_data.append(record)
-                            
-                            # Récupérer les liens de ce panorama via API pour expansion du graphe
-                            try:
-                                from streetlevel.mapy import get_links_async
-                                links = await get_links_async(pano_id)
-                                if links:
-                                    for link in links:
-                                        try:
-                                            if not self.state_manager.is_visited(link.pano.id) and not self.state_manager.is_failed(link.pano.id):
-                                                link_dict = self.link_to_dict(link)
-                                                new_links.append(link_dict)
-                                        except Exception:
-                                            continue
-                            except Exception:
-                                # Pas critique, on continue sans les liens
-                                pass
-                                
-                        except Exception:
+                    # Traitement ultra-rapide
+                    for pano in panoramas:
+                        if isinstance(pano, Exception) or not pano:
                             continue
+                        
+                        # Ajout ultra-rapide
+                        self.exploration_order += 1
+                        record = self.panorama_to_dict_minimal(pano, self.exploration_order)
+                        self.batch_data.append(record)
+                        
+                        # Écriture par batch pour éviter l'OOM
+                        await self._write_batch_if_needed()
+                        
+                        # Expansion du graphe
+                        if pano.links:
+                            for link in pano.links:
+                                try:
+                                    if link.pano.id not in self.visited and link.pano.id not in self.failed_cache:
+                                        self.visited.add(link.pano.id)
+                                        self.to_visit.append(link.pano.id)
+                                except:
+                                    continue
                     
-                    # Ajouter les nouveaux liens à la queue SQLite en batch
-                    if new_links:
-                        self.state_manager.add_to_queue(new_links)
-                    
-                    # Nettoyage périodique
-                    if self.bfs_iterations % CACHE_CLEANUP_INTERVAL == 0:
+                    # Nettoyage agressif pour très gros volumes
+                    if self.bfs_iterations % MEGA_CLEANUP_INTERVAL == 0:
                         self.processing_cache.clear()
-                        self.state_manager.cleanup_old_failed()
+                        
+                        # Limiter failed_cache selon config
+                        if len(self.failed_cache) > MEGA_FAILED_CACHE_MAX:
+                            failed_list = list(self.failed_cache)
+                            self.failed_cache.clear()
+                            self.failed_cache.update(failed_list[-MEGA_FAILED_CACHE_KEEP:])
+                        
+                        # Limiter to_visit si trop gros (garde-fou)
+                        if len(self.to_visit) > MEGA_TO_VISIT_LIMIT:
+                            print(f"{EMOJI_WARNING} to_visit trop gros ({len(self.to_visit):,}), limitation...")
+                            temp_list = []
+                            for _ in range(MEGA_TO_VISIT_KEEP):
+                                if self.to_visit:
+                                    temp_list.append(self.to_visit.popleft())
+                            self.to_visit.clear()
+                            self.to_visit.extend(temp_list)
+                        
                         gc.collect()
                     
                 except Exception as e:
                     self.errors += 1
                     continue
-                
+                    
         except Exception as e:
             print(f"{EMOJI_ERROR} Erreur exploration: {e}")
         
@@ -768,23 +563,15 @@ class UltraProxyOptimizedCollector:
         end_time = time.time()
         total_time = end_time - self.start_time
         
-        # Statistiques finales depuis SQLite
-        final_stats = self.state_manager.get_exploration_stats()
-        speed = final_stats['visited_count'] / total_time if total_time > 0 else 0
+        speed = len(self.visited) / total_time if total_time > 0 else 0
         proxy_stats = self.proxy_manager.get_stats()
         
-        # Déterminer si l'exploration est complète
-        is_complete = False
-        if target_count is not None:
-            is_complete = final_stats['visited_count'] >= target_count
-        else:
-            is_complete = final_stats['queue_size'] == 0  # Plus de panoramas à explorer
-        
         return {
-            'test_name': "PROXY_ULTRA_OPTIMIZED_SQLITE",
+            'test_name': "PROXY_ULTRA_OPTIMIZED_UNLIMITED" if unlimited_mode else "PROXY_ULTRA_OPTIMIZED",
+            'unlimited_mode': unlimited_mode,
             'num_proxies': len(self.proxy_manager.proxies),
             'total_max_concurrent': self.total_max_concurrent,
-            'total_panoramas': final_stats['visited_count'],
+            'total_panoramas': len(self.visited),
             'total_time': total_time,
             'speed': speed,
             'network_calls': self.network_calls,
@@ -794,56 +581,52 @@ class UltraProxyOptimizedCollector:
             'proxy_requests': proxy_stats['total_requests'],
             'proxy_success_rate': proxy_stats['success_rate'],
             'proxy_details': proxy_stats['proxy_details'],
-            'completed': is_complete,
-            'exploration_mode': 'limited' if target_count is not None else 'complete',
-            'target_count': target_count,
+            'completed': unlimited_mode or len(self.visited) >= effective_target,
             'output_dir': self.output_dir,
             'bfs_iterations': self.bfs_iterations,
-            'failed_count': final_stats['failed_count'],
-            'remaining_queue': final_stats['queue_size'],
-            'db_path': self.state_manager.db_path,
-            'resumable': True
+            'failed_cache_size': len(self.failed_cache),
+            'total_files_written': self.total_files_written,
+            'total_records_written': self.total_records_written
         }
 
+    def _get_memory_usage(self) -> float:
+        """Obtient l'utilisation mémoire actuelle en MB"""
+        try:
+            import psutil
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        except:
+            return 0.0
+
 def print_proxy_results(stats: Dict):
-    """Résultats avec informations proxies + SQLite"""
+    """Résultats avec informations proxies - Support mode illimité"""
     if not stats:
         return
     
     total_minutes = int(stats['total_time'] // 60)
     total_seconds = int(stats['total_time'] % 60)
+    total_hours = stats['total_time'] / 3600
     
     print(f"\n{PROGRESS_SEPARATOR}")
-    mode_text = "LIMITÉE (TEST)" if stats.get('exploration_mode') == 'limited' else "COMPLÈTE"
-    print(f"{EMOJI_GLOBE} RÉSULTATS EXPLORATION {mode_text} + SQLITE")
-    print(PROGRESS_SEPARATOR)
-    print(f"{EMOJI_TARGET} Panoramas: {stats['total_panoramas']:,}")
-    
-    if stats.get('exploration_mode') == 'limited':
-        print(f"{EMOJI_TARGET} Limite test: {stats.get('target_count', 'N/A'):,}")
+    if stats.get('unlimited_mode'):
+        print(f"{EMOJI_GLOBE} RÉSULTATS COLLECTE TOTALE (MODE ILLIMITÉ)")
     else:
-        if stats.get('remaining_queue', 0) > 0:
-            print(f"{EMOJI_WARNING} Queue restante: {stats['remaining_queue']:,} (exploration interrompue)")
-        else:
-            print(f"{EMOJI_SUCCESS} Exploration complète - Aucun panorama restant")
+        print(f"{EMOJI_GLOBE} RÉSULTATS AVEC PROXIES MULTIPLES")
+    print(PROGRESS_SEPARATOR)
     
-    print(f"⏱️ Temps: {total_minutes}m {total_seconds}s ({stats['total_time']:.1f}s)")
+    print(f"{EMOJI_TARGET} Panoramas: {stats['total_panoramas']:,}")
+    if total_hours >= 1:
+        print(f"⏱️ Temps: {total_hours:.1f}h ({total_minutes}m {total_seconds}s)")
+    else:
+        print(f"⏱️ Temps: {total_minutes}m {total_seconds}s ({stats['total_time']:.1f}s)")
+        
     print(f"{EMOJI_LIGHTNING} Vitesse: {stats['speed']:.1f} panoramas/seconde")
     print(f"{EMOJI_GLOBE} Proxies: {stats['num_proxies']} proxies")
     print(f"{EMOJI_LINK} Concurrence totale: {stats['total_max_concurrent']:,}")
     print(f"{EMOJI_CYCLE} Itérations BFS: {stats['bfs_iterations']:,}")
-    print(f"{EMOJI_DISK} Sortie: {stats['output_dir']}")
-    print(f"{EMOJI_DISK} Base de données: {stats.get('db_path', 'N/A')}")
-    
-    # Informations de persistance
-    print(f"\n{EMOJI_DISK} PERSISTANCE SQLITE:")
-    print(f"   • Panoramas en base: {stats['total_panoramas']:,}")
-    print(f"   • Queue restante: {stats['remaining_queue']:,}")
-    print(f"   • Échecs enregistrés: {stats.get('failed_count', 0):,}")
-    if stats.get('resumable', False):
-        print(f"   • ✅ Script reprennable automatiquement")
-        if stats['remaining_queue'] > 0:
-            print(f"   • 🔄 Pour reprendre: relancer le script")
+    print(f"{EMOJI_DISK} Fichiers écrits: {stats.get('total_files_written', 'N/A')}")
+    print(f"{EMOJI_PACKAGE} Records totaux: {stats.get('total_records_written', 'N/A'):,}")
+    print(f"{EMOJI_FOLDER} Sortie: {stats['output_dir']}")
     
     # Efficacité des proxies
     proxy_throughput = stats['proxy_requests'] / stats['total_time']
@@ -862,107 +645,93 @@ def print_proxy_results(stats: Dict):
             print(f"   • Proxy {idx+1}: {st['requests']:,} req | {st['errors']} err")
     
     print(f"\n{EMOJI_CHART_UP} PERFORMANCE:")
-    if stats['network_calls'] > 0:
-        print(f"   • Timeouts: {stats['timeouts']} ({stats['timeouts']/stats['network_calls']*100:.1f}%)")
-        print(f"   • Erreurs: {stats['errors']} ({stats['errors']/stats['network_calls']*100:.1f}%)")
-    else:
-        print(f"   • Timeouts: {stats['timeouts']} (0.0%)")
-        print(f"   • Erreurs: {stats['errors']} (0.0%)")
+    print(f"   • Timeouts: {stats['timeouts']} ({stats['timeouts']/stats['network_calls']*100:.1f}%)")
+    print(f"   • Erreurs: {stats['errors']} ({stats['errors']/stats['network_calls']*100:.1f}%)")
+    print(f"   • Cache échecs: {stats['failed_cache_size']:,}")
     
-    # Comparaison
-    improvement = (stats['speed'] / ORIGINAL_SCRIPT_SPEED - 1) * 100
-    print(f"\n{EMOJI_ROCKET} AMÉLIORATION:")
-    print(f"   • vs Script original: +{improvement:.0f}%")
-    print(f"   • Facteur d'accélération: {stats['speed']/ORIGINAL_SCRIPT_SPEED:.1f}x")
-    print(f"   • Avantages SQLite: 🚫 OOM, ♻️ Reprise auto")
+    # Estimation de couverture pour mode illimité
+    if stats.get('unlimited_mode'):
+        print(f"\n{EMOJI_TARGET} COUVERTURE TOTALE:")
+        print(f"   • Mode: Collecte exhaustive")
+        print(f"   • Statut: {'Terminé' if stats['completed'] else 'Interrompu'}")
+        if stats['total_panoramas'] > 1000000:
+            print(f"   • Volume: {stats['total_panoramas']/1000000:.1f}M panoramas")
+        print(f"   • Territoire: République Tchèque + connexions")
     
-    # Projection selon le mode
-    theoretical_max = proxy_throughput / efficiency if efficiency > 0 else 0
-    print(f"\n{EMOJI_TARGET} PROJECTION:")
-    if stats.get('exploration_mode') == 'limited':
-        print(f"   • Pour exploration complète: ~{theoretical_max:.0f} panoramas/seconde")
-        if stats.get('remaining_queue', 0) > 0:
-            estimated_time = stats['remaining_queue'] / theoretical_max if theoretical_max > 0 else 0
-            print(f"   • Temps estimé complet: ~{estimated_time/3600:.1f}h")
-    else:
-        print(f"   • Débit théorique max: ~{theoretical_max:.0f} panoramas/seconde")
-        if stats['remaining_queue'] > 0:
-            estimated_time = stats['remaining_queue'] / theoretical_max if theoretical_max > 0 else 0
-            print(f"   • Temps estimé pour finir: ~{estimated_time/3600:.1f}h")
+    # Comparaison avec script original
+    if stats['total_panoramas'] > 0:
+        improvement = (stats['speed'] / ORIGINAL_SCRIPT_SPEED - 1) * 100
+        print(f"\n{EMOJI_ROCKET} AMÉLIORATION:")
+        print(f"   • vs Script original: +{improvement:.0f}%")
+        print(f"   • Facteur d'accélération: {stats['speed']/ORIGINAL_SCRIPT_SPEED:.1f}x")
+    
+    # Projection et estimation
+    if not stats.get('unlimited_mode'):
+        theoretical_max = proxy_throughput / efficiency if efficiency > 0 else 0
+        print(f"\n{EMOJI_TARGET} PROJECTION THÉORIQUE:")
+        print(f"   • Avec cette latence API: ~{theoretical_max:.0f} panoramas/seconde")
         print(f"   • Limitation: Bande passante API + latence réseau")
 
-async def main(limit: Optional[int] = None):
-    """Version proxy ultra-optimisée avec exploration complète par défaut + SQLite"""
-    # Configuration avec TOUS les proxies
+async def main():
+    """Version proxy ultra-optimisée - MODE ILLIMITÉ"""
+    # Configuration pour collecte TOTALE
     PRAGUE_LAT = DEFAULT_START_LATITUDE
     PRAGUE_LON = DEFAULT_START_LONGITUDE
+    
+    # MODE ILLIMITÉ : supprimer la limite !
+    TARGET_COUNT = None if UNLIMITED_MODE else DEFAULT_TARGET_COUNT
+    
     MAX_CONCURRENT_PER_PROXY = ULTRA_MAX_CONCURRENT_PER_PROXY
     OUTPUT_DIR = DEFAULT_OUTPUT_DIR
-    DB_PATH = "exploration_state.db"
     
-    print(f"{EMOJI_FACTORY} COLLECTE MAPY.CZ - PROXIES MULTIPLES + SQLITE")
+    print(f"{EMOJI_FACTORY} COLLECTE MAPY.CZ - MODE ILLIMITÉ")
     print(f"{EMOJI_LOCATION} Départ: Prague ({PRAGUE_LAT}, {PRAGUE_LON})")
     
-    if limit is not None:
-        print(f"{EMOJI_TARGET} Mode test - Limite: {limit:,} panoramas")
+    if UNLIMITED_MODE:
+        print(f"{EMOJI_TARGET} Objectif: COLLECTE TOTALE - TOUS LES PANORAMAS EXISTANTS")
+        print(f"{EMOJI_WARNING} Pas de limite ! Collecte jusqu'à épuisement")
     else:
-        print(f"{EMOJI_TARGET} Mode complet - Exploration de TOUTE la République tchèque")
+        print(f"{EMOJI_TARGET} Objectif: {TARGET_COUNT:,} panoramas")
         
     print(f"{EMOJI_GLOBE} {len(PROXIES)} proxies disponibles")
     print(f"{EMOJI_LIGHTNING} {MAX_CONCURRENT_PER_PROXY} connexions par proxy")
     print(f"{EMOJI_FIRE} TOTAL: {len(PROXIES) * MAX_CONCURRENT_PER_PROXY:,} connexions simultanées")
     print(f"{EMOJI_FOLDER} Sortie: {OUTPUT_DIR}/")
-    print(f"{EMOJI_DISK} Base de données: {DB_PATH}")
     print(f"{EMOJI_CHART} Collecte des données historiques activée")
-    print(f"{EMOJI_CYCLE} Reprise automatique en cas d'interruption")
+    print(f"{EMOJI_MEMORY} Optimisations mémoire actives pour gros volumes")
     
     try:
-        async with UltraProxyOptimizedCollector(OUTPUT_DIR, PROXIES, MAX_CONCURRENT_PER_PROXY, DB_PATH) as collector:
+        async with UltraProxyOptimizedCollector(OUTPUT_DIR, PROXIES, MAX_CONCURRENT_PER_PROXY) as collector:
             stats = await collector.explore_with_proxies(
                 start_lat=PRAGUE_LAT,
                 start_lon=PRAGUE_LON,
-                target_count=limit
+                target_count=TARGET_COUNT
             )
         
         print_proxy_results(stats)
         
-        if stats and stats['completed']:
-            if limit is not None:
-                print(f"\n{EMOJI_PARTY} TEST TERMINÉ! {limit:,} panoramas en {stats['total_time']:.1f}s")
+        if stats:
+            if stats.get('unlimited_mode'):
+                print(f"\n{EMOJI_PARTY} COLLECTE TOTALE TERMINÉE!")
+                print(f"{EMOJI_SUCCESS} {stats['total_panoramas']:,} panoramas collectés")
+                print(f"{EMOJI_DISK} {stats['total_files_written']} fichiers écrits ({stats['total_records_written']:,} records)")
+                print(f"{EMOJI_LIGHTNING} PERFORMANCE: {stats['speed']:.1f} panoramas/seconde")
+                print(f"{EMOJI_TIME} Durée totale: {stats['total_time']/3600:.1f} heures")
+                print(f"{EMOJI_GLOBE} Couverture: Exhaustive (tous les panoramas accessibles)")
+            elif stats['completed']:
+                print(f"\n{EMOJI_PARTY} TERMINÉ! {TARGET_COUNT:,} panoramas en {stats['total_time']:.1f}s")
+                print(f"{EMOJI_LIGHTNING} PERFORMANCE FINALE: {stats['speed']:.1f} panoramas/seconde")
             else:
-                print(f"\n{EMOJI_PARTY} EXPLORATION COMPLÈTE TERMINÉE!")
-                print(f"{EMOJI_SUCCESS} {stats['total_panoramas']:,} panoramas collectés en {stats['total_time']:.1f}s")
-                print(f"{EMOJI_GLOBE} Toute la République tchèque explorée!")
-            print(f"{EMOJI_LIGHTNING} PERFORMANCE FINALE: {stats['speed']:.1f} panoramas/seconde")
-            print(f"{EMOJI_GLOBE} PROXIES: {stats['num_proxies']} proxies utilisés efficacement")
-        else:
-            if limit is not None:
-                print(f"\n{EMOJI_WARNING} Test incomplet: {stats['total_panoramas']:,} panoramas (objectif: {limit:,})")
-            else:
-                print(f"\n{EMOJI_WARNING} Exploration interrompue: {stats['total_panoramas']:,} panoramas")
-                print(f"{EMOJI_INFO} Queue restante: {stats['remaining_queue']:,} panoramas")
-            
-            # Instructions de reprise
-            if stats.get('resumable', False) and stats['remaining_queue'] > 0:
-                print(f"\n{EMOJI_CYCLE} REPRISE AUTOMATIQUE DISPONIBLE:")
-                print(f"   • Pour continuer l'exploration, relancez simplement:")
-                if limit is not None:
-                    print(f"   • python {sys.argv[0]} {limit}")
-                else:
-                    print(f"   • python {sys.argv[0]}")
-                print(f"   • Le script reprendra automatiquement là où il s'est arrêté")
+                print(f"\n{EMOJI_WARNING} Incomplet: {stats['total_panoramas']:,} panoramas")
         
     except KeyboardInterrupt:
         print(f"\n{EMOJI_ERROR} Interrompu par l'utilisateur")
-        print(f"{EMOJI_INFO} L'état a été sauvegardé dans {DB_PATH}")
-        print(f"{EMOJI_CYCLE} Pour reprendre, relancez le script avec les mêmes arguments")
+        print(f"{EMOJI_DISK} Les données collectées sont sauvegardées dans {OUTPUT_DIR}/")
         sys.exit(1)
     except Exception as e:
         print(f"\n{EMOJI_ERROR} Erreur: {e}")
         import traceback
         traceback.print_exc()
-        print(f"{EMOJI_INFO} L'état a été sauvegardé dans {DB_PATH}")
-        print(f"{EMOJI_CYCLE} Pour reprendre, relancez le script avec les mêmes arguments")
         sys.exit(1)
 
 if __name__ == "__main__":
@@ -978,18 +747,4 @@ if __name__ == "__main__":
     import sys
     sys.setswitchinterval(SWITCH_INTERVAL)
     
-    # Gestion des arguments de ligne de commande
-    limit = None
-    if len(sys.argv) > 1:
-        try:
-            limit = int(sys.argv[1])
-            print(f"{EMOJI_TARGET} Limite de test spécifiée: {limit:,} panoramas")
-        except ValueError:
-            print(f"{EMOJI_ERROR} Argument invalide: {sys.argv[1]} (doit être un nombre entier)")
-            print(f"{EMOJI_INFO} Usage: python {sys.argv[0]} [limite_pour_test]")
-            print(f"{EMOJI_INFO} Sans argument: exploration complète de la République tchèque")
-            sys.exit(1)
-    else:
-        print(f"{EMOJI_GLOBE} Mode exploration complète - collecte de TOUS les panoramas")
-    
-    asyncio.run(main(limit))
+    asyncio.run(main())

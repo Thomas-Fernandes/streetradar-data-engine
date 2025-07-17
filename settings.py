@@ -121,6 +121,8 @@ EMOJI_FACTORY = "🏭"
 EMOJI_LOCATION = "📍"
 EMOJI_PACKAGE = "📦"
 EMOJI_DISK = "💾"
+EMOJI_MEMORY = "💾"
+EMOJI_TIME = "⏱️"
 EMOJI_SUCCESS = "✅"
 EMOJI_ERROR = "❌"
 EMOJI_WARNING = "⚠️"
@@ -128,10 +130,6 @@ EMOJI_PARTY = "🎉"
 EMOJI_LINK = "🔗"
 EMOJI_CYCLE = "🔄"
 EMOJI_CHART_UP = "📈"
-EMOJI_INFO = "ℹ️"
-EMOJI_NEW = "🆕"
-EMOJI_PLUS = "➕"
-EMOJI_CLEAN = "🧹"
 
 # Progress display formatting
 PROGRESS_SEPARATOR = "=" * 80
@@ -142,6 +140,38 @@ PROGRESS_SEPARATOR = "=" * 80
 # Default parameters for panorama fetching
 FETCH_LINKS_DEFAULT = True
 FETCH_HISTORICAL_DEFAULT = True
+
+# =============================================================================
+# CONFIGURATION POUR COLLECTE TOTALE (ILLIMITÉE)
+# =============================================================================
+# Mode collecte totale - tous les panoramas existants
+UNLIMITED_MODE = True  # True = collecte illimitée, False = limite fixe
+UNLIMITED_TARGET = float('inf')  # Collecte jusqu'à épuisement
+
+# Critères d'arrêt pour mode illimité
+UNLIMITED_STOP_EMPTY_ITERATIONS = 50  # Arrêt si 50 itérations sans nouveaux panoramas
+UNLIMITED_STOP_EMPTY_QUEUE_TIME = 300  # Arrêt si queue vide pendant 5min
+
+# Métriques spéciales pour collecte totale
+UNLIMITED_PROGRESS_INTERVAL = 100  # Affichage toutes les 100 itérations
+UNLIMITED_CHECKPOINT_INTERVAL = 100000  # Checkpoint tous les 100k panoramas
+
+# =============================================================================
+# CONFIGURATION POUR 50 MILLIONS DE PANORAMAS
+# =============================================================================
+# Taille des batches pour éviter l'OOM
+MEGA_BATCH_SIZE = 10000  # Écriture tous les 10k panoramas
+
+# Limites de cache pour gros volumes
+MEGA_FAILED_CACHE_MAX = 50000  # Limite du cache d'échecs
+MEGA_FAILED_CACHE_KEEP = 25000  # Nombre à garder lors du nettoyage
+
+# Limite de la queue to_visit (garde-fou)
+MEGA_TO_VISIT_LIMIT = 5000000  # 5M max dans la queue
+MEGA_TO_VISIT_KEEP = 2000000   # 2M à garder lors du nettoyage
+
+# Fréquence de nettoyage pour gros volumes
+MEGA_CLEANUP_INTERVAL = 100  # Toutes les 100 itérations BFS
 
 # =============================================================================
 # SYSTEM PATHS

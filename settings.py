@@ -128,6 +128,10 @@ EMOJI_PARTY = "🎉"
 EMOJI_LINK = "🔗"
 EMOJI_CYCLE = "🔄"
 EMOJI_CHART_UP = "📈"
+EMOJI_INFO = "ℹ️"
+EMOJI_NEW = "🆕"
+EMOJI_PLUS = "➕"
+EMOJI_CLEAN = "🧹"
 
 # Progress display formatting
 PROGRESS_SEPARATOR = "=" * 80

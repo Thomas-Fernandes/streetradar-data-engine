@@ -198,6 +198,21 @@ RESUME_PROMPT = False  # Demander confirmation avant reprise
 CHECKPOINT_BACKUP_COUNT = 3  # Garder 3 backups rotatifs
 
 # =============================================================================
+# FAILED PANORAMA RETRY CONFIGURATION
+# =============================================================================
+# Configuration spécifique pour le retry des panoramas échoués
+FAILED_RETRY_OUTPUT_DIR = "data/mapy_failed_retry"
+FAILED_RETRY_TIMEOUT = 30  # Timeout plus long pour les échecs
+FAILED_RETRY_MAX_CONCURRENT_PER_PROXY = 50  # Concurrence plus agressive
+FAILED_RETRY_BATCH_SIZE = 100  # Batches plus petits
+FAILED_RETRY_MAX_ATTEMPTS = 3  # Nombre max de tentatives par panorama
+FAILED_RETRY_DELAY_BETWEEN_ATTEMPTS = 0.5  # Délai réduit entre tentatives (0.5s)
+FAILED_RETRY_CHECKPOINT_INTERVAL = 1000  # Checkpoint tous les 1000 panoramas
+
+# Emojis spécifiques au retry
+EMOJI_RECYCLE = "♻️"
+
+# =============================================================================
 # SYSTEM PATHS
 # =============================================================================
 # Local streetlevel module path (relative to script)

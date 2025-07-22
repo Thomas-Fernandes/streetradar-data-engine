@@ -217,7 +217,7 @@ PROGRESS_SEPARATOR = "=" * 80
 # =============================================================================
 # Default parameters for panorama fetching
 FETCH_LINKS_DEFAULT = True
-FETCH_HISTORICAL_DEFAULT = True
+FETCH_HISTORICAL_DEFAULT = False
 
 # =============================================================================
 # CONFIGURATION POUR COLLECTE TOTALE (ILLIMITÉE)
@@ -279,7 +279,7 @@ CHECKPOINT_FAILED_CACHE_FILE = "failed_cache.pkl"
 CHECKPOINT_METADATA_FILE = "metadata.json"
 
 # Options de reprise
-AUTO_RESUME = True  # Reprise automatique si checkpoint détecté
+AUTO_RESUME = False  # Reprise automatique si checkpoint détecté
 RESUME_PROMPT = False  # Demander confirmation avant reprise
 CHECKPOINT_BACKUP_COUNT = 3  # Garder 3 backups rotatifs
 

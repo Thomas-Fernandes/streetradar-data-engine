@@ -43,7 +43,7 @@ class PanoramaProcessor:
     deduplicated dataset, with data validation and cleaning.
     """
     
-    def __init__(self, raw_dir: str = "data/mapy/raw/test", processed_dir: str = "data/mapy/processed/test"):
+    def __init__(self, raw_dir: str = "../../data/mapy/raw/test", processed_dir: str = "../../data/mapy/processed/test"):
         """
         Initialize the panorama processor.
         

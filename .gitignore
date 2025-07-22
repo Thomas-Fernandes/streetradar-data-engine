@@ -1,9 +1,10 @@
 /venv
 __pycache__/
 /checkpoints
+current_session.json
 
 #Proxy
 proxy.py
 
-#Data Lake
-/raw
+#Data
+/data

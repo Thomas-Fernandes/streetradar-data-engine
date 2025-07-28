@@ -245,18 +245,18 @@ class PanoramaProcessor:
                     elevation,
                     permalink,
                     "order" as exploration_order,
-                    links,
+                    links_count,
                     link_ids,
                     historical_count,
                     historical,
-                    time as collection_time
+                    collection_time
                 FROM read_parquet([{chunk_pattern}])
                 WHERE id IS NOT NULL 
                   AND lat IS NOT NULL 
                   AND lon IS NOT NULL
                   AND lat BETWEEN -90 AND 90
                   AND lon BETWEEN -180 AND 180
-                ORDER BY id, time DESC;
+                ORDER BY id, collection_time DESC;
                 """
             else:
                 # Insert and deduplicate with subsequent chunks
@@ -271,11 +271,11 @@ class PanoramaProcessor:
                     elevation,
                     permalink,
                     "order" as exploration_order,
-                    links,
+                    links_count,
                     link_ids,
                     historical_count,
                     historical,
-                    time as collection_time
+                    collection_time
                 FROM read_parquet([{chunk_pattern}])
                 WHERE id IS NOT NULL 
                   AND lat IS NOT NULL 
@@ -283,7 +283,7 @@ class PanoramaProcessor:
                   AND lat BETWEEN -90 AND 90
                   AND lon BETWEEN -180 AND 180
                   AND id NOT IN (SELECT id FROM consolidated_panoramas)
-                ORDER BY id, time DESC;
+                ORDER BY id, collection_time DESC;
                 """
             
             self.conn.execute(query)

@@ -156,23 +156,27 @@ class DuckDBTileProcessor:
         """
         self.base_dir = Path(base_dir)
         self.raw_dir = self.base_dir / "raw"
-        self.processed_dir = self.base_dir / "processed"
+        self.processed_base_dir = self.base_dir / "processed"
         self.temp_dir = Path(tempfile.mkdtemp(prefix="naver_duckdb_"))
         
         # System optimization
         self.system_resources = SystemResources.detect()
         self.max_workers = max_workers or min(self.system_resources.duckdb_threads, 8)
         
-        # Create directories
-        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        # Session-specific directories will be set up in discover_pbf_files
+        self.processed_dir = None
+        self.session_num = None
+        
+        # Create base directories
+        self.processed_base_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Setup logging FIRST
+        # Setup logging FIRST (temporary location)
         self.logger = self._setup_logging()
         
-        # Output files
-        self.output_file = self.processed_dir / "naver_panoramas.parquet"
-        self.stats_file = self.processed_dir / "processing_stats.json"
+        # Output files will be set after session discovery
+        self.output_file = None
+        self.stats_file = None
         
         # Initialize DuckDB with optimal configuration
         self.conn = duckdb.connect(config=self.system_resources.get_duckdb_config())
@@ -214,8 +218,9 @@ class DuckDBTileProcessor:
         logger.setLevel(logging.DEBUG)
         logger.handlers.clear()
         
-        # File handler with buffering
-        log_file = self.processed_dir / f"duckdb_processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        # File handler with buffering - use base processed dir initially
+        log_dir = self.processed_dir if self.processed_dir else self.processed_base_dir
+        log_file = log_dir / f"duckdb_processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
@@ -234,11 +239,36 @@ class DuckDBTileProcessor:
         
         return logger
     
+    def _reconfigure_logging(self):
+        """Reconfigure logging to use session-specific directory."""
+        if not self.processed_dir or not hasattr(self, 'logger'):
+            return
+        
+        # Remove old file handler if exists
+        for handler in self.logger.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                self.logger.removeHandler(handler)
+                handler.close()
+        
+        # Add new file handler with session-specific directory
+        log_file = self.processed_dir / f"duckdb_processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_formatter)
+        self.logger.addHandler(file_handler)
+        
+        self.logger.info(f"📝 Logging reconfigured for session {self.session_num}: {log_file}")
+    
     def _log_initialization(self):
         """Log initialization information."""
         self.logger.info("🚀 DuckDB-Optimized Naver PBF Processor")
         self.logger.info(f"📁 Raw data: {self.raw_dir}")
-        self.logger.info(f"📁 Processed data: {self.processed_dir}")
+        processed_info = f"{self.processed_dir}" if self.processed_dir else f"{self.processed_base_dir} (session-specific dir will be created)"
+        self.logger.info(f"📁 Processed data: {processed_info}")
         self.logger.info(f"🔧 System Resources:")
         self.logger.info(f"   💾 Total Memory: {self.system_resources.total_memory_gb:.1f} GB")
         self.logger.info(f"   💾 DuckDB Memory: {self.system_resources.duckdb_memory_gb:.1f} GB")
@@ -270,8 +300,21 @@ class DuckDBTileProcessor:
         if not zoom_dir.exists():
             raise FileNotFoundError(f"Zoom 17 directory not found: {zoom_dir}")
         
+        # Setup session-specific processed directory and output files
+        self.session_num = session_num
+        self.processed_dir = self.processed_base_dir / str(session_num)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Set output files for this session
+        self.output_file = self.processed_dir / "naver_panoramas.parquet"
+        self.stats_file = self.processed_dir / "processing_stats.json"
+        
+        # Reconfigure logging to use session-specific directory
+        self._reconfigure_logging()
+        
         self.logger.info(f"📂 Processing session {session_num}, zoom level 17")
         self.logger.info(f"📁 Scanning directory: {zoom_dir}")
+        self.logger.info(f"📁 Session output directory: {self.processed_dir}")
         
         # Create DuckDB table for file inventory
         self.conn.execute("""
@@ -300,21 +343,14 @@ class DuckDBTileProcessor:
         all_pbf_files = list(zoom_dir.rglob("*.pbf"))
         total_files = len(all_pbf_files)
         
-        # DEBUG: Limiter à 10000 tuiles pour le débogage
-        DEBUG_MAX_TILES = 20000
-        if total_files > DEBUG_MAX_TILES:
-            all_pbf_files = all_pbf_files[:DEBUG_MAX_TILES]
-            self.logger.info(f"� DEBUG MODE: Limiting to {DEBUG_MAX_TILES:,} tiles (found {total_files:,} total)")
-            total_files = DEBUG_MAX_TILES
-        
-        self.logger.info(f"�📈 Found {total_files:,} PBF files to process")
+        self.logger.info(f"📈 Found {total_files:,} PBF files to process")
         
         if total_files == 0:
             raise FileNotFoundError(f"No PBF files found in {zoom_dir}")
         
         scan_start_time = time.time()
         
-        self.logger.info(f"📊 Processing {total_files:,} tiles (DEBUG MODE)")
+        self.logger.info(f"📊 Processing {total_files:,} tiles")
         
         for i, pbf_file in enumerate(all_pbf_files):
             try:

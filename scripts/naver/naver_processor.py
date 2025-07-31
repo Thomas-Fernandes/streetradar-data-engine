@@ -45,7 +45,7 @@ import duckdb
 
 # Minimal external dependencies for PBF decoding only
 import mapbox_vector_tile
-from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
+# Shapely removed - direct coordinate transformation for better performance
 
 
 @dataclass
@@ -300,13 +300,21 @@ class DuckDBTileProcessor:
         all_pbf_files = list(zoom_dir.rglob("*.pbf"))
         total_files = len(all_pbf_files)
         
-        self.logger.info(f"📈 Found {total_files:,} PBF files to process")
+        # DEBUG: Limiter à 10000 tuiles pour le débogage
+        DEBUG_MAX_TILES = 20000
+        if total_files > DEBUG_MAX_TILES:
+            all_pbf_files = all_pbf_files[:DEBUG_MAX_TILES]
+            self.logger.info(f"� DEBUG MODE: Limiting to {DEBUG_MAX_TILES:,} tiles (found {total_files:,} total)")
+            total_files = DEBUG_MAX_TILES
+        
+        self.logger.info(f"�📈 Found {total_files:,} PBF files to process")
         
         if total_files == 0:
             raise FileNotFoundError(f"No PBF files found in {zoom_dir}")
         
-        # Second pass: process files with progress
         scan_start_time = time.time()
+        
+        self.logger.info(f"📊 Processing {total_files:,} tiles (DEBUG MODE)")
         
         for i, pbf_file in enumerate(all_pbf_files):
             try:
@@ -557,18 +565,15 @@ class DuckDBTileProcessor:
             geometry_data = feature.get('geometry', {})
             properties = feature.get('properties', {})
             
-            # Convert to Shapely geometry
-            shapely_geom = self._mvt_geometry_to_shapely(geometry_data)
-            if shapely_geom is None:
+            # Convert MVT geometry directly to geographic WKT (no Shapely needed)
+            geographic_wkt = self._mvt_to_geographic_wkt(
+                geometry_data, tile_info['x'], tile_info['y'], tile_info['z']
+            )
+            if geographic_wkt is None:
                 return None
             
-            # Apply Y-axis mirroring (Naver specific)
-            mirrored_geom = self._apply_y_mirror(shapely_geom)
-            
-            # Transform to geographic coordinates
-            geographic_geom = self._tile_to_geographic(
-                mirrored_geom, tile_info['x'], tile_info['y'], tile_info['z']
-            )
+            # Extract geometry type from WKT
+            geometry_type = geographic_wkt.split('(')[0].strip()
             
             return {
                 'feature_id': feature_id,
@@ -577,8 +582,8 @@ class DuckDBTileProcessor:
                 'tile_y': tile_info['y'],
                 'tile_z': tile_info['z'],
                 'session': tile_info['session'],
-                'geometry_type': geographic_geom.geom_type,
-                'geometry_wkt': geographic_geom.wkt,
+                'geometry_type': geometry_type,
+                'geometry_wkt': geographic_wkt,
                 'properties': json.dumps(properties) if properties else '{}'
             }
             
@@ -586,60 +591,106 @@ class DuckDBTileProcessor:
             self.logger.debug(f"Error processing feature: {e}")
             return None
     
-    def _mvt_geometry_to_shapely(self, geometry_data: Dict):
-        """Convert MVT geometry to Shapely geometry."""
+    def _mvt_to_geographic_wkt(self, geometry_data: Dict, x: int, y: int, z: int, tile_extent: int = 4096) -> Optional[str]:
+        """
+        Convert MVT geometry directly to geographic WKT for maximum performance.
+        No Shapely dependency - direct coordinate transformation.
+        
+        Args:
+            geometry_data: MVT geometry data
+            x, y, z: Tile coordinates  
+            tile_extent: Tile extent (default: 4096)
+            
+        Returns:
+            WGT string or None if invalid
+        """
         geom_type = geometry_data.get('type', '')
         coordinates = geometry_data.get('coordinates', [])
         
         if not coordinates:
             return None
         
-        try:
-            if geom_type == 'Point':
-                return Point(coordinates)
-            elif geom_type == 'LineString':
-                return LineString(coordinates)
-            elif geom_type == 'Polygon':
-                return Polygon(coordinates[0], coordinates[1:] if len(coordinates) > 1 else None)
-            elif geom_type == 'MultiPoint':
-                return MultiPoint([Point(coord) for coord in coordinates])
-            elif geom_type == 'MultiLineString':
-                return MultiLineString([LineString(line) for line in coordinates])
-            elif geom_type == 'MultiPolygon':
-                polygons = []
-                for poly_coords in coordinates:
-                    exterior = poly_coords[0]
-                    holes = poly_coords[1:] if len(poly_coords) > 1 else None
-                    polygons.append(Polygon(exterior, holes))
-                return MultiPolygon(polygons)
-            else:
-                return None
-        except Exception:
-            return None
-    
-    def _apply_y_mirror(self, geometry, tile_extent: int = 4096):
-        """Apply Y-axis mirroring for Naver tiles."""
-        from shapely.ops import transform
-        
-        def mirror_coords(x, y, z=None):
-            return x, tile_extent - y
-        
-        return transform(mirror_coords, geometry)
-    
-    def _tile_to_geographic(self, geometry, x: int, y: int, z: int, tile_extent: int = 4096):
-        """Transform tile coordinates to geographic (WGS84)."""
-        from shapely.ops import transform
-        
+        # Calculate transformation parameters once
         west, south, east, north = self._tile_to_bbox(x, y, z)
         x_scale = (east - west) / tile_extent
         y_scale = (north - south) / tile_extent
         
-        def transform_coords(x_coord, y_coord, z_coord=None):
-            lon = west + (x_coord * x_scale)
-            lat = south + (y_coord * y_scale)
-            return lon, lat
+        def transform_coord_pair(coord_pair):
+            """Transform a single coordinate pair [x, y] to geographic."""
+            tile_x, tile_y = coord_pair
+            lon = west + (tile_x * x_scale)
+            lat = south + (tile_y * y_scale)
+            return f"{lon} {lat}"
         
-        return transform(transform_coords, geometry)
+        def transform_coords(coords):
+            """Transform coordinate array."""
+            return [transform_coord_pair(coord) for coord in coords]
+        
+        try:
+            if geom_type == 'Point':
+                coord_str = transform_coord_pair(coordinates)
+                return f"POINT({coord_str})"
+                
+            elif geom_type == 'LineString':
+                coords_str = ', '.join(transform_coords(coordinates))
+                return f"LINESTRING({coords_str})"
+                
+            elif geom_type == 'Polygon':
+                # Exterior ring
+                exterior_coords = ', '.join(transform_coords(coordinates[0]))
+                
+                # Interior rings (holes) if any
+                if len(coordinates) > 1:
+                    holes = []
+                    for hole in coordinates[1:]:
+                        hole_coords = ', '.join(transform_coords(hole))
+                        holes.append(f"({hole_coords})")
+                    holes_str = ', ' + ', '.join(holes)
+                else:
+                    holes_str = ''
+                
+                return f"POLYGON(({exterior_coords}){holes_str})"
+                
+            elif geom_type == 'MultiPoint':
+                points = []
+                for coord in coordinates:
+                    coord_str = transform_coord_pair(coord)
+                    points.append(f"({coord_str})")
+                return f"MULTIPOINT({', '.join(points)})"
+                
+            elif geom_type == 'MultiLineString':
+                lines = []
+                for line in coordinates:
+                    coords_str = ', '.join(transform_coords(line))
+                    lines.append(f"({coords_str})")
+                return f"MULTILINESTRING({', '.join(lines)})"
+                
+            elif geom_type == 'MultiPolygon':
+                polygons = []
+                for poly_coords in coordinates:
+                    # Exterior ring
+                    exterior_coords = ', '.join(transform_coords(poly_coords[0]))
+                    
+                    # Interior rings (holes) if any
+                    if len(poly_coords) > 1:
+                        holes = []
+                        for hole in poly_coords[1:]:
+                            hole_coords = ', '.join(transform_coords(hole))
+                            holes.append(f"({hole_coords})")
+                        holes_str = ', ' + ', '.join(holes)
+                    else:
+                        holes_str = ''
+                    
+                    polygons.append(f"(({exterior_coords}){holes_str})")
+                
+                return f"MULTIPOLYGON({', '.join(polygons)})"
+                
+            else:
+                return None
+                
+        except Exception as e:
+            self.logger.debug(f"Error converting geometry: {e}")
+            return None
     
     def _bulk_insert_features(self, features: List[Dict]):
         """Efficiently bulk insert features into DuckDB."""
@@ -1029,7 +1080,7 @@ class DuckDBTileProcessor:
 def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
     """
     Standalone function for processing a batch of PBF files in a worker process.
-    This function runs in a separate process and returns processed features.
+    Optimized version without Shapely dependency for maximum performance.
     
     Args:
         worker_batch: List of tile information dictionaries
@@ -1041,9 +1092,7 @@ def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
     import json
     import time
     import math
-    from typing import Dict, Tuple
-    from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
-    from shapely.ops import transform
+    from typing import Dict, Tuple, Optional
     
     def tile_to_bbox(x: int, y: int, z: int) -> Tuple[float, float, float, float]:
         """Calculate geographic bounding box for a tile."""
@@ -1059,55 +1108,97 @@ def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
         
         return west, south, east, north
     
-    def mvt_geometry_to_shapely(geometry_data: Dict):
-        """Convert MVT geometry to Shapely geometry."""
+    def mvt_to_geographic_wkt(geometry_data: Dict, x: int, y: int, z: int, tile_extent: int = 4096) -> Optional[str]:
+        """
+        Convert MVT geometry directly to geographic WKT for maximum performance.
+        No Shapely dependency - direct coordinate transformation.
+        """
         geom_type = geometry_data.get('type', '')
         coordinates = geometry_data.get('coordinates', [])
         
         if not coordinates:
             return None
         
-        try:
-            if geom_type == 'Point':
-                return Point(coordinates)
-            elif geom_type == 'LineString':
-                return LineString(coordinates)
-            elif geom_type == 'Polygon':
-                return Polygon(coordinates[0], coordinates[1:] if len(coordinates) > 1 else None)
-            elif geom_type == 'MultiPoint':
-                return MultiPoint([Point(coord) for coord in coordinates])
-            elif geom_type == 'MultiLineString':
-                return MultiLineString([LineString(line) for line in coordinates])
-            elif geom_type == 'MultiPolygon':
-                polygons = []
-                for poly_coords in coordinates:
-                    exterior = poly_coords[0]
-                    holes = poly_coords[1:] if len(poly_coords) > 1 else None
-                    polygons.append(Polygon(exterior, holes))
-                return MultiPolygon(polygons)
-            else:
-                return None
-        except Exception:
-            return None
-    
-    def apply_y_mirror(geometry, tile_extent: int = 4096):
-        """Apply Y-axis mirroring for Naver tiles."""
-        def mirror_coords(x, y, z=None):
-            return x, tile_extent - y
-        return transform(mirror_coords, geometry)
-    
-    def tile_to_geographic(geometry, x: int, y: int, z: int, tile_extent: int = 4096):
-        """Transform tile coordinates to geographic (WGS84)."""
+        # Calculate transformation parameters once
         west, south, east, north = tile_to_bbox(x, y, z)
         x_scale = (east - west) / tile_extent
         y_scale = (north - south) / tile_extent
         
-        def transform_coords(x_coord, y_coord, z_coord=None):
-            lon = west + (x_coord * x_scale)
-            lat = south + (y_coord * y_scale)
-            return lon, lat
+        def transform_coord_pair(coord_pair):
+            """Transform a single coordinate pair [x, y] to geographic."""
+            tile_x, tile_y = coord_pair
+            lon = west + (tile_x * x_scale)
+            lat = south + (tile_y * y_scale)
+            return f"{lon} {lat}"
         
-        return transform(transform_coords, geometry)
+        def transform_coords(coords):
+            """Transform coordinate array."""
+            return [transform_coord_pair(coord) for coord in coords]
+        
+        try:
+            if geom_type == 'Point':
+                coord_str = transform_coord_pair(coordinates)
+                return f"POINT({coord_str})"
+                
+            elif geom_type == 'LineString':
+                coords_str = ', '.join(transform_coords(coordinates))
+                return f"LINESTRING({coords_str})"
+                
+            elif geom_type == 'Polygon':
+                # Exterior ring
+                exterior_coords = ', '.join(transform_coords(coordinates[0]))
+                
+                # Interior rings (holes) if any
+                if len(coordinates) > 1:
+                    holes = []
+                    for hole in coordinates[1:]:
+                        hole_coords = ', '.join(transform_coords(hole))
+                        holes.append(f"({hole_coords})")
+                    holes_str = ', ' + ', '.join(holes)
+                else:
+                    holes_str = ''
+                
+                return f"POLYGON(({exterior_coords}){holes_str})"
+                
+            elif geom_type == 'MultiPoint':
+                points = []
+                for coord in coordinates:
+                    coord_str = transform_coord_pair(coord)
+                    points.append(f"({coord_str})")
+                return f"MULTIPOINT({', '.join(points)})"
+                
+            elif geom_type == 'MultiLineString':
+                lines = []
+                for line in coordinates:
+                    coords_str = ', '.join(transform_coords(line))
+                    lines.append(f"({coords_str})")
+                return f"MULTILINESTRING({', '.join(lines)})"
+                
+            elif geom_type == 'MultiPolygon':
+                polygons = []
+                for poly_coords in coordinates:
+                    # Exterior ring
+                    exterior_coords = ', '.join(transform_coords(poly_coords[0]))
+                    
+                    # Interior rings (holes) if any
+                    if len(poly_coords) > 1:
+                        holes = []
+                        for hole in poly_coords[1:]:
+                            hole_coords = ', '.join(transform_coords(hole))
+                            holes.append(f"({hole_coords})")
+                        holes_str = ', ' + ', '.join(holes)
+                    else:
+                        holes_str = ''
+                    
+                    polygons.append(f"(({exterior_coords}){holes_str})")
+                
+                return f"MULTIPOLYGON({', '.join(polygons)})"
+                
+            else:
+                return None
+                
+        except Exception:
+            return None
     
     # Process the batch
     all_features = []
@@ -1133,18 +1224,15 @@ def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
                         geometry_data = feature.get('geometry', {})
                         properties = feature.get('properties', {})
                         
-                        # Convert to Shapely geometry
-                        shapely_geom = mvt_geometry_to_shapely(geometry_data)
-                        if shapely_geom is None:
+                        # Convert MVT geometry directly to geographic WKT (no Shapely)
+                        geographic_wkt = mvt_to_geographic_wkt(
+                            geometry_data, tile_info['x'], tile_info['y'], tile_info['z']
+                        )
+                        if geographic_wkt is None:
                             continue
                         
-                        # Apply Y-axis mirroring (Naver specific)
-                        mirrored_geom = apply_y_mirror(shapely_geom)
-                        
-                        # Transform to geographic coordinates
-                        geographic_geom = tile_to_geographic(
-                            mirrored_geom, tile_info['x'], tile_info['y'], tile_info['z']
-                        )
+                        # Extract geometry type from WKT
+                        geometry_type = geographic_wkt.split('(')[0].strip()
                         
                         processed_feature = {
                             'feature_id': feature_id,
@@ -1153,8 +1241,8 @@ def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
                             'tile_y': tile_info['y'],
                             'tile_z': tile_info['z'],
                             'session': tile_info['session'],
-                            'geometry_type': geographic_geom.geom_type,
-                            'geometry_wkt': geographic_geom.wkt,
+                            'geometry_type': geometry_type,
+                            'geometry_wkt': geographic_wkt,
                             'properties': json.dumps(properties) if properties else '{}'
                         }
                         

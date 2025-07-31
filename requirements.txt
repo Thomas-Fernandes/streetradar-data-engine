@@ -10,3 +10,4 @@ CoordinatesConverter
 pyexiv2
 pyarrow
 psutil
+mapbox-vector-tile

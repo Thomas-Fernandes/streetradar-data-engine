@@ -358,7 +358,7 @@ class DuckDBTileProcessor:
         # Insert into DuckDB table for efficient querying (with progress)
         self.logger.info("📊 Building DuckDB file index...")
         
-        batch_size = 1000
+        batch_size = 50000  # Increased from 1000 to 50,000 for better performance
         index_start_time = time.time()
         
         for i in range(0, len(tile_files), batch_size):
@@ -372,13 +372,12 @@ class DuckDBTileProcessor:
                 for tf in batch
             ])
             
-            # Progress logging every 10,000 indexed files
-            if (i + batch_size) % 10000 == 0:
-                elapsed = time.time() - index_start_time
-                current_indexed = min(i + batch_size, len(tile_files))
-                rate = current_indexed / elapsed if elapsed > 0 else 0
-                progress = current_indexed / len(tile_files) * 100
-                self.logger.info(f"📊 Index: {current_indexed:,}/{len(tile_files):,} ({progress:.1f}%) - {rate:.0f} files/sec")
+            # Progress logging every 50,000 indexed files (every batch)
+            elapsed = time.time() - index_start_time
+            current_indexed = min(i + batch_size, len(tile_files))
+            rate = current_indexed / elapsed if elapsed > 0 else 0
+            progress = current_indexed / len(tile_files) * 100
+            self.logger.info(f"📊 Index: {current_indexed:,}/{len(tile_files):,} ({progress:.1f}%) - {rate:.0f} files/sec")
         
         index_elapsed = time.time() - index_start_time
         index_rate = len(tile_files) / index_elapsed if index_elapsed > 0 else 0
@@ -711,17 +710,21 @@ class DuckDBTileProcessor:
                         for i in range(0, len(batch_tiles), worker_batch_size)
                     ]
                     
-                    # Submit worker tasks
+                    # Submit worker tasks using standalone function
                     futures = [
-                        executor.submit(self._process_worker_batch, worker_batch)
+                        executor.submit(process_worker_batch_standalone, worker_batch)
                         for worker_batch in worker_batches
                     ]
                     
-                    # Collect results
+                    # Collect results and insert into DuckDB
                     for future in as_completed(futures):
                         try:
-                            features_count = future.result()
-                            self.logger.debug(f"Worker batch completed: {features_count} features")
+                            features = future.result()
+                            if features:
+                                self._bulk_insert_features(features)
+                                with self.lock:
+                                    self.stats.processed_files += len([f for f in batch_tiles if any(feat['tile_x'] == f['x'] and feat['tile_y'] == f['y'] for feat in features)])
+                            self.logger.debug(f"Worker batch completed: {len(features)} features")
                         except Exception as e:
                             self.logger.error(f"Worker batch failed: {e}")
             else:
@@ -748,13 +751,6 @@ class DuckDBTileProcessor:
         self.stats.total_features = final_count
         
         self.logger.info(f"✅ Processing complete: {final_count:,} features extracted")
-    
-    def _process_worker_batch(self, worker_batch: List[Dict]) -> int:
-        """Process a batch of tiles in a worker process."""
-        # Note: This runs in a separate process, so we need a new DuckDB connection
-        # For now, we'll return features to be inserted by the main process
-        # In a full implementation, we'd use shared memory or temporary files
-        return self.process_pbf_batch(worker_batch)
     
     def optimize_and_export(self):
         """Optimize data in DuckDB and export to GeoParquet."""
@@ -1009,7 +1005,7 @@ class DuckDBTileProcessor:
             # Step 1: Discover PBF files and create file inventory
             tile_files = self.discover_pbf_files()
             
-            # Step 2: Process all tiles with parallel workers and DuckDB aggregation
+            # Step 2: Process all tiles using DuckDB for data processing
             self.process_all_tiles(tile_files)
             
             # Step 3: Optimize data and export to GeoParquet
@@ -1043,9 +1039,11 @@ def process_worker_batch_standalone(worker_batch: List[Dict]) -> List[Dict]:
     """
     import mapbox_vector_tile
     import json
+    import time
+    import math
+    from typing import Dict, Tuple
     from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
     from shapely.ops import transform
-    import math
     
     def tile_to_bbox(x: int, y: int, z: int) -> Tuple[float, float, float, float]:
         """Calculate geographic bounding box for a tile."""

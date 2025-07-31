@@ -34,6 +34,8 @@ import time
 import math
 import psutil
 import multiprocessing
+import shutil
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
@@ -856,7 +858,12 @@ class DuckDBTileProcessor:
                     geometry_type,
                     geometry,
                     properties,
-                    created_at
+                    created_at,
+                    CASE 
+                        WHEN geometry_type = 'LINESTRING' THEN 
+                            ST_Length(ST_Transform(geometry, 'EPSG:4326', 'EPSG:3857')) / 1000.0
+                        ELSE NULL 
+                    END as distance_km
                 FROM features
                 ORDER BY layer, tile_x, tile_y, feature_id
             ) TO '{self.output_file}' 
@@ -891,6 +898,18 @@ class DuckDBTileProcessor:
             
             validation_result = self.conn.execute(validation_query).fetchone()
             
+            # Get distance statistics for LineStrings
+            distance_stats = self.conn.execute(f"""
+                SELECT 
+                    COUNT(*) as linestring_count,
+                    ROUND(AVG(distance_km), 3) as avg_distance_km,
+                    ROUND(MIN(distance_km), 3) as min_distance_km,
+                    ROUND(MAX(distance_km), 3) as max_distance_km,
+                    ROUND(SUM(distance_km), 1) as total_distance_km
+                FROM read_parquet('{self.output_file}')
+                WHERE geometry_type = 'LINESTRING' AND distance_km IS NOT NULL
+            """).fetchone()
+            
             # Calculate geographic bounds from tile coordinates (more efficient)
             min_x, max_x = validation_result[3], validation_result[4]
             min_y, max_y = validation_result[5], validation_result[6]
@@ -907,6 +926,14 @@ class DuckDBTileProcessor:
             self.logger.info(f"   🔷 Geometry types: {validation_result[2]}")
             self.logger.info(f"   🗺️  Tile range: X[{validation_result[3]}-{validation_result[4]}], Y[{validation_result[5]}-{validation_result[6]}]")
             self.logger.info(f"   🌍 Geographic bounds: [{bbox_west:.6f}, {bbox_south:.6f}, {bbox_east:.6f}, {bbox_north:.6f}]")
+            
+            # Display distance statistics if available
+            if distance_stats and distance_stats[0] > 0:
+                self.logger.info("📏 Distance statistics (LineStrings):")
+                self.logger.info(f"   • LineStrings with distance: {distance_stats[0]:,}")
+                self.logger.info(f"   • Average distance: {distance_stats[1]} km")
+                self.logger.info(f"   • Distance range: {distance_stats[2]} - {distance_stats[3]} km")
+                self.logger.info(f"   • Total network length: {distance_stats[4]:,} km")
             
         except Exception as e:
             self.logger.error(f"❌ Validation failed: {e}")

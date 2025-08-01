@@ -2,6 +2,7 @@
 __pycache__/
 /checkpoints
 current_session.json
+.env
 
 #Proxy
 proxy.py

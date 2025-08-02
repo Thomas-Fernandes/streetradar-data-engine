@@ -173,9 +173,9 @@ def run_tippecanoe(geojson_file: Path, output_file: Path) -> bool:
         "--read-parallel",
         '--minimum-zoom=3',
         '--maximum-zoom=17',
-        '--simplification=5',
+        '--simplification=20',
         "--no-feature-limit",
-        "--maximum-tile-bytes=2000000",
+        "--maximum-tile-bytes=500000",
         "--force",
         str(geojson_file)
     ]

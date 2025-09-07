@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
 from streetlevel.ja import find_panorama_async, find_panorama_by_id_async
 
 # Configuration
-OUTPUT_DIR = Path("../../data/ja360/panoramas")
+OUTPUT_DIR = Path("../../data/ja360/raw")
 REYKJAVIK_LAT = 64.1355
 REYKJAVIK_LON = -21.8954
 SEARCH_RADIUS = 100  # mètres

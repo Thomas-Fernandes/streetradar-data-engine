@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 JA360 Panorama Scraper - BFS Navigation
-Collecte tous les panoramas d'Islande en naviguant de voisin en voisin
-Supporte maintenant 3 zones: Reykjavik, Vestmannaeyjar et Grimsey
+Collects all panoramas of Iceland by navigating from neighbor to neighbor
+Now supports 3 zones: Reykjavik, Vestmannaeyjar and Grimsey
 """
 
 import asyncio
@@ -18,45 +18,45 @@ from pathlib import Path
 from datetime import datetime
 from typing import Set, Dict, Optional
 
-# Ajouter streetlevel au path
+# Add streetlevel to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
 
 from streetlevel.ja import find_panorama_async, find_panorama_by_id_async
 
-# Configuration des zones
+# Zone configuration
 ZONES = {
     1: {
         'name': 'Reykjavik',
         'lat': 64.1355,
         'lon': -21.8954,
-        'description': 'Capitale et île principale d\'Islande',
+        'description': 'Capital and main island of Iceland',
         'search_radius': 100
     },
     2: {
         'name': 'Vestmannaeyjar',
         'lat': 63.4377,
         'lon': -20.2670,
-        'description': 'Îles Vestmann - Heimaey (sud de l\'Islande)',
-        'search_radius': 500  # Rayon plus large pour les îles isolées
+        'description': 'Vestmann Islands - Heimaey (south of Iceland)',
+        'search_radius': 500  # Larger radius for isolated islands
     },
     3: {
         'name': 'Grimsey',
-        'lat': 66.5442,  # Coordonnées converties depuis ISN93 x=543713, y=671978
+        'lat': 66.5442,  # Coordinates converted from ISN93 x=543713, y=671978
         'lon': -18.0133, 
-        'description': 'Île de Grimsey - Point avec panoramas confirmés (cercle arctique)',
-        'search_radius': 500  # Rayon plus large pour les îles isolées
+        'description': 'Grimsey Island - Point with confirmed panoramas (Arctic Circle)',
+        'search_radius': 500  # Larger radius for isolated islands
     }
 }
 
 # Configuration
 OUTPUT_DIR = Path("../../data/ja360/raw")
-SEARCH_RADIUS = 100  # mètres
-BATCH_SIZE = 2500  # Sauvegarder tous les 2500 panoramas (optimisé pour I/O)
-MAX_CONCURRENT = 75  # Requêtes simultanées (réduit pour éviter 504)
-NETWORK_TIMEOUT = 30.0  # Timeout pour les requêtes réseau (augmenté pour diagnostique)
-PROGRESS_INTERVAL = 100  # Affichage des stats détaillées toutes les 1000 collectes
-MONITORING_INTERVAL = 10.0  # Intervalle des logs de monitoring en temps réel (secondes)
-BATCH_DELAY = 0.1  # Délai entre les batches pour éviter de surcharger le serveur (secondes)
+SEARCH_RADIUS = 100  # meters
+BATCH_SIZE = 2500  # Save every 2500 panoramas (optimized for I/O)
+MAX_CONCURRENT = 75  # Concurrent requests (reduced to avoid 504)
+NETWORK_TIMEOUT = 30.0  # Timeout for network requests (increased for diagnostics)
+PROGRESS_INTERVAL = 100  # Display detailed stats every 1000 collections
+MONITORING_INTERVAL = 10.0  # Real-time monitoring log interval (seconds)
+BATCH_DELAY = 0.1  # Delay between batches to avoid overloading the server (seconds)
 
 class JA360Scraper:
     def __init__(self, zone_id: int):
@@ -64,71 +64,71 @@ class JA360Scraper:
         self.zone = ZONES[zone_id]
         self.zone_name = self.zone['name']
         
-        # Utiliser directement le dossier raw sans sous-dossiers
+        # Use the raw folder directly without subfolders
         self.output_dir = OUTPUT_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration du logging
+        # Logging configuration
         self.setup_logging()
         
-        # État du scraping
-        self.visited: Set[int] = set()  # IDs des panoramas déjà traités
-        self.to_visit: deque = deque()  # Queue BFS des panoramas à traiter
-        self.panoramas: Dict[int, dict] = {}  # Données collectées
+        # Scraping state
+        self.visited: Set[int] = set()  # IDs of already processed panoramas
+        self.to_visit: deque = deque()  # BFS queue of panoramas to process
+        self.panoramas: Dict[int, dict] = {}  # Collected data
         
-        # Métriques
+        # Metrics
         self.start_time = time.time()
         self.total_requests = 0
         self.errors = 0
         self.timeouts = 0
         self.last_stats_time = time.time()
         self.last_collected_count = 0
-        self.last_periodic_log_time = time.time()  # Pour les logs périodiques
+        self.last_periodic_log_time = time.time()  # For periodic logs
         
-        # Semaphore pour limiter la concurrence
+        # Semaphore to limit concurrency
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         
         self.log_and_print(f"🇮🇸 JA360 Panorama Scraper - Zone: {self.zone_name}")
         self.log_and_print(f"📍 {self.zone['description']}")
-        self.log_and_print(f"📁 Sortie: {self.output_dir}")
-        self.log_and_print(f"🎯 Point de départ: {self.zone_name} ({self.zone['lat']}, {self.zone['lon']})")
-        self.log_and_print(f"⚡ Concurrence: {MAX_CONCURRENT} requêtes simultanées")
-        self.log_and_print(f"⏱️ Timeout réseau: {NETWORK_TIMEOUT}s")
-        self.log_and_print(f"💾 Taille des batches: {BATCH_SIZE} panoramas")
-        self.log_and_print(f"⏸️ Délai entre batches: {BATCH_DELAY}s")
-        self.log_and_print(f"📊 Statistiques détaillées toutes les {PROGRESS_INTERVAL} collectes")
-        self.log_and_print(f"⏰ Monitoring temps réel toutes les {MONITORING_INTERVAL}s")
+        self.log_and_print(f"📁 Output: {self.output_dir}")
+        self.log_and_print(f"🎯 Starting point: {self.zone_name} ({self.zone['lat']}, {self.zone['lon']})")
+        self.log_and_print(f"⚡ Concurrency: {MAX_CONCURRENT} simultaneous requests")
+        self.log_and_print(f"⏱️ Network timeout: {NETWORK_TIMEOUT}s")
+        self.log_and_print(f"💾 Batch size: {BATCH_SIZE} panoramas")
+        self.log_and_print(f"⏸️ Delay between batches: {BATCH_DELAY}s")
+        self.log_and_print(f"📊 Detailed statistics every {PROGRESS_INTERVAL} collections")
+        self.log_and_print(f"⏰ Real-time monitoring every {MONITORING_INTERVAL}s")
     
     def setup_logging(self):
-        """Configure le système de logging"""
-        # Créer le nom du fichier de log avec timestamp
+        """Configure the logging system"""
+        # Create log filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"ja360_scraper_{self.zone_name.lower()}_{timestamp}.log"
         log_path = self.output_dir / log_filename
         
-        # Configuration du logger
+        # Logger configuration
         self.logger = logging.getLogger('JA360Scraper')
         self.logger.setLevel(logging.INFO)
         
-        # Créer le formateur
+        # Create formatter
         formatter = logging.Formatter(
             '%(asctime)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        # Gestionnaire pour le fichier
+        # File handler
         file_handler = logging.FileHandler(log_path, encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         
-        # Ajouter le gestionnaire au logger
+        # Add handler to logger
         self.logger.addHandler(file_handler)
         
         self.log_path = log_path
-        print(f"📝 Fichier de log: {log_path}")
+        print(f"📝 Log file: {log_path}")
     
     def log_and_print(self, message: str, level: str = "info"):
-        """Affiche le message dans le terminal ET l'enregistre dans le log"""
+        """Display message in terminal AND record it in the log"""
         print(message)
         
         if level.lower() == "error":
@@ -139,7 +139,7 @@ class JA360Scraper:
             self.logger.info(message)
     
     def panorama_to_dict(self, pano) -> dict:
-        """Convertit un panorama JA en dictionnaire sérialisable"""
+        """Convert a JA panorama to a serializable dictionary"""
         data = {
             'id': pano.id,
             'lat': pano.lat,
@@ -150,14 +150,14 @@ class JA360Scraper:
             'collection_time': time.time()
         }
         
-        # Date de capture
+        # Capture date
         if pano.date:
             data['date'] = {
                 'year': pano.date.year,
                 'month': pano.date.month
             }
         
-        # Adresse
+        # Address
         if pano.address:
             data['address'] = {
                 'street_name_and_house_number': pano.address.street_name_and_house_number,
@@ -165,7 +165,7 @@ class JA360Scraper:
                 'place': pano.address.place
             }
         
-        # Noms de rues
+        # Street names
         if pano.street_names:
             data['street_names'] = []
             for street in pano.street_names:
@@ -176,7 +176,7 @@ class JA360Scraper:
                 }
                 data['street_names'].append(street_data)
         
-        # Voisins (IDs seulement pour éviter la récursion)
+        # Neighbors (IDs only to avoid recursion)
         if pano.neighbors:
             data['neighbor_ids'] = [neighbor.id for neighbor in pano.neighbors]
         else:
@@ -185,12 +185,12 @@ class JA360Scraper:
         return data
     
     async def fetch_panorama_details(self, session: aiohttp.ClientSession, panoid: int) -> Optional[dict]:
-        """Récupère les détails complets d'un panorama"""
+        """Retrieve complete details of a panorama"""
         async with self.semaphore:
             try:
                 self.total_requests += 1
                 
-                # Ajouter timeout pour éviter les blocages
+                # Add timeout to avoid blocking
                 pano = await asyncio.wait_for(
                     find_panorama_by_id_async(panoid, session),
                     timeout=NETWORK_TIMEOUT
@@ -208,44 +208,44 @@ class JA360Scraper:
                 return None
             except Exception as e:
                 self.errors += 1
-                self.log_and_print(f"❌ Erreur panorama {panoid}: {e}", "error")
+                self.log_and_print(f"❌ Error panorama {panoid}: {e}", "error")
                 return None
     
     async def find_starting_panorama(self, session: aiohttp.ClientSession) -> Optional[int]:
-        """Trouve le panorama de départ dans la zone sélectionnée"""
+        """Find the starting panorama in the selected zone"""
         search_radius = self.zone.get('search_radius', SEARCH_RADIUS)
-        self.log_and_print(f"🔍 Recherche du panorama de départ à {self.zone_name}...")
-        self.log_and_print(f"📐 Rayon de recherche initial: {search_radius}m")
+        self.log_and_print(f"🔍 Searching for starting panorama at {self.zone_name}...")
+        self.log_and_print(f"📐 Initial search radius: {search_radius}m")
         
         try:
-            # Première tentative avec le rayon normal
+            # First attempt with normal radius
             pano = await find_panorama_async(self.zone['lat'], self.zone['lon'], session, search_radius)
             if pano:
-                self.log_and_print(f"✅ Panorama de départ trouvé: {pano.id} à ({pano.lat:.4f}, {pano.lon:.4f})")
+                self.log_and_print(f"✅ Starting panorama found: {pano.id} at ({pano.lat:.4f}, {pano.lon:.4f})")
                 return pano.id
             
-            # Pour les îles isolées, essayer avec un rayon plus large
-            if self.zone_id in [2, 3]:  # Vestmannaeyjar et Grimsey
+            # For isolated islands, try with a larger radius
+            if self.zone_id in [2, 3]:  # Vestmannaeyjar and Grimsey
                 extended_radius = 1000  # 1km
-                self.log_and_print(f"🔍 Tentative avec rayon étendu: {extended_radius}m...")
+                self.log_and_print(f"🔍 Attempting with extended radius: {extended_radius}m...")
                 pano = await find_panorama_async(self.zone['lat'], self.zone['lon'], session, extended_radius)
                 if pano:
-                    self.log_and_print(f"✅ Panorama de départ trouvé (rayon étendu): {pano.id} à ({pano.lat:.4f}, {pano.lon:.4f})")
+                    self.log_and_print(f"✅ Starting panorama found (extended radius): {pano.id} at ({pano.lat:.4f}, {pano.lon:.4f})")
                     return pano.id
             
-            self.log_and_print(f"❌ Aucun panorama trouvé à {self.zone_name} (rayons testés: {search_radius}m", "error")
+            self.log_and_print(f"❌ No panorama found at {self.zone_name} (tested radii: {search_radius}m", "error")
             if self.zone_id in [2, 3]:
-                self.log_and_print(f"   et {extended_radius}m)", "error")
+                self.log_and_print(f"   and {extended_radius}m)", "error")
             else:
                 self.log_and_print(")", "error")
             return None
                 
         except Exception as e:
-            self.log_and_print(f"❌ Erreur recherche initiale: {e}", "error")
+            self.log_and_print(f"❌ Initial search error: {e}", "error")
             return None
     
     def save_batch(self, force=False):
-        """Sauvegarde un batch de panoramas"""
+        """Save a batch of panoramas"""
         if len(self.panoramas) >= BATCH_SIZE or force:
             if not self.panoramas:
                 return
@@ -258,29 +258,29 @@ class JA360Scraper:
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump(self.panoramas, f, indent=2, ensure_ascii=False)
                 
-                self.log_and_print(f"💾 Batch sauvé: {len(self.panoramas)} panoramas → {filename}")
-                self.panoramas.clear()  # Vider pour le prochain batch
+                self.log_and_print(f"💾 Batch saved: {len(self.panoramas)} panoramas → {filename}")
+                self.panoramas.clear()  # Clear for next batch
                 
             except Exception as e:
-                self.log_and_print(f"❌ Erreur sauvegarde: {e}", "error")
+                self.log_and_print(f"❌ Save error: {e}", "error")
     
     def print_stats(self):
-        """Affiche les statistiques de progression avec métriques détaillées"""
+        """Display progress statistics with detailed metrics"""
         current_time = time.time()
         elapsed = current_time - self.start_time
         
-        # Vitesse globale
+        # Overall speed
         overall_speed = len(self.visited) / elapsed if elapsed > 0 else 0
         
-        # Vitesse instantanée (depuis les dernières stats)
+        # Instantaneous speed (since last stats)
         time_since_last = current_time - self.last_stats_time
         collected_since_last = len(self.visited) - self.last_collected_count
         instant_speed = collected_since_last / time_since_last if time_since_last > 0 else 0
         
-        # Taux de succès
+        # Success rate
         success_rate = (self.total_requests - self.errors) / self.total_requests * 100 if self.total_requests > 0 else 0
         
-        # Estimation du temps restant (basé sur la queue actuelle)
+        # Remaining time estimation (based on current queue)
         if instant_speed > 0 and len(self.to_visit) > 0:
             eta_seconds = len(self.to_visit) / instant_speed
             eta_minutes = eta_seconds / 60
@@ -290,67 +290,67 @@ class JA360Scraper:
         
         self.log_and_print(f"📊 {len(self.visited):,} panoramas | "
               f"Queue: {len(self.to_visit):,} | "
-              f"Vitesse: {overall_speed:.1f}/s (inst: {instant_speed:.1f}/s) | "
-              f"Succès: {success_rate:.1f}% | "
-              f"Timeouts: {self.timeouts} | Erreurs: {self.errors}{eta_str} | "
+              f"Speed: {overall_speed:.1f}/s (inst: {instant_speed:.1f}/s) | "
+              f"Success: {success_rate:.1f}% | "
+              f"Timeouts: {self.timeouts} | Errors: {self.errors}{eta_str} | "
               f"{elapsed:.0f}s")
         
-        # Mettre à jour les métriques pour le prochain calcul
+        # Update metrics for next calculation
         self.last_stats_time = current_time
         self.last_collected_count = len(self.visited)
     
     def print_periodic_status(self):
-        """Affiche le statut périodique selon MONITORING_INTERVAL"""
+        """Display periodic status according to MONITORING_INTERVAL"""
         current_time = time.time()
         elapsed = current_time - self.start_time
         
-        # Vitesse globale
+        # Overall speed
         overall_speed = len(self.visited) / elapsed if elapsed > 0 else 0
         
-        # Taux de succès
+        # Success rate
         success_rate = (self.total_requests - self.errors) / self.total_requests * 100 if self.total_requests > 0 else 0
         
-        self.log_and_print(f"⏰ [{elapsed:.0f}s] {len(self.visited):,} panoramas collectés | "
-              f"Vitesse: {overall_speed:.2f}/s | "
+        self.log_and_print(f"⏰ [{elapsed:.0f}s] {len(self.visited):,} panoramas collected | "
+              f"Speed: {overall_speed:.2f}/s | "
               f"Queue: {len(self.to_visit):,} | "
-              f"Succès: {success_rate:.1f}% | "
+              f"Success: {success_rate:.1f}% | "
               f"Timeouts: {self.timeouts} | "
-              f"Requêtes: {self.total_requests}")
+              f"Requests: {self.total_requests}")
         
-        # Mettre à jour le timestamp du dernier log
+        # Update timestamp of last log
         self.last_periodic_log_time = current_time
     
     async def scrape(self):
-        """Scraping principal avec BFS optimisé"""
-        # Configuration optimisée du connecteur
+        """Main scraping with optimized BFS"""
+        # Optimized connector configuration
         connector = aiohttp.TCPConnector(
-            limit=MAX_CONCURRENT * 2,  # Pool de connexions plus large
+            limit=MAX_CONCURRENT * 2,  # Larger connection pool
             limit_per_host=MAX_CONCURRENT,
-            keepalive_timeout=60,  # Maintenir les connexions plus longtemps
+            keepalive_timeout=60,  # Keep connections longer
             enable_cleanup_closed=True
         )
         timeout = aiohttp.ClientTimeout(
-            total=NETWORK_TIMEOUT + 5,  # Timeout global légèrement plus élevé
-            connect=5,  # Timeout de connexion rapide
-            sock_read=NETWORK_TIMEOUT  # Timeout de lecture
+            total=NETWORK_TIMEOUT + 5,  # Slightly higher global timeout
+            connect=5,  # Fast connection timeout
+            sock_read=NETWORK_TIMEOUT  # Read timeout
         )
         
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             
-            # 1. Trouver le panorama de départ
+            # 1. Find the starting panorama
             start_id = await self.find_starting_panorama(session)
             if not start_id:
                 return
             
-            # 2. Initialiser la queue BFS
+            # 2. Initialize BFS queue
             self.to_visit.append(start_id)
             
-            self.log_and_print(f"\n🚀 Début du scraping BFS...")
+            self.log_and_print(f"\n🚀 Starting BFS scraping...")
             
-            # 3. BFS principal
+            # 3. Main BFS
             while self.to_visit:
                 
-                # Préparer le batch de panoramas à traiter
+                # Prepare batch of panoramas to process
                 current_batch = []
                 batch_size = min(MAX_CONCURRENT, len(self.to_visit))
                 
@@ -364,7 +364,7 @@ class JA360Scraper:
                 if not current_batch:
                     break
                 
-                # Traitement parallèle du batch
+                # Parallel batch processing
                 tasks = [
                     self.fetch_panorama_details(session, panoid) 
                     for panoid in current_batch
@@ -372,7 +372,7 @@ class JA360Scraper:
                 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Traitement des résultats
+                # Process results
                 new_neighbors = 0
                 successful_in_batch = 0
                 
@@ -382,54 +382,54 @@ class JA360Scraper:
                     
                     if result:
                         successful_in_batch += 1
-                        # Stocker le panorama
+                        # Store the panorama
                         self.panoramas[panoid] = result
                         
-                        # Ajouter les voisins à la queue
+                        # Add neighbors to queue
                         for neighbor_id in result.get('neighbor_ids', []):
                             if neighbor_id not in self.visited and neighbor_id not in self.to_visit:
                                 self.to_visit.append(neighbor_id)
                                 new_neighbors += 1
                 
                 
-                # Sauvegarde périodique
+                # Periodic save
                 self.save_batch()
                 
-                # Logs périodiques basés sur le temps
+                # Time-based periodic logs
                 current_time = time.time()
                 if current_time - self.last_periodic_log_time >= MONITORING_INTERVAL:
                     self.print_periodic_status()
                 
-                # Statistiques détaillées périodiques (plus fréquentes)
+                # Detailed periodic statistics (more frequent)
                 if len(self.visited) % PROGRESS_INTERVAL == 0 and len(self.visited) > 0:
                     self.print_stats()
-                    self.log_and_print(f"   🆕 {new_neighbors} nouveaux voisins découverts")
+                    self.log_and_print(f"   🆕 {new_neighbors} new neighbors discovered")
                 
-                # Petit délai entre les batches pour éviter de surcharger le serveur
+                # Small delay between batches to avoid overloading the server
                 if BATCH_DELAY > 0:
                     await asyncio.sleep(BATCH_DELAY)
                 
-                # Limite de sécurité (optionnel - désactivée pour collecte complète)
-                # if len(self.visited) > 50000:  # Ajustez selon vos besoins
-                #     print(f"⚠️ Limite de sécurité atteinte: {len(self.visited)} panoramas")
+                # Safety limit (optional - disabled for complete collection)
+                # if len(self.visited) > 50000:  # Adjust according to your needs
+                #     print(f"⚠️ Safety limit reached: {len(self.visited)} panoramas")
                 #     break
         
-        # Sauvegarde finale
+        # Final save
         self.save_batch(force=True)
         
-        # Statistiques finales
+        # Final statistics
         total_time = time.time() - self.start_time
         avg_speed = len(self.visited) / total_time if total_time > 0 else 0
         
-        self.log_and_print(f"\n🎉 Scraping terminé!")
-        self.log_and_print(f"📊 {len(self.visited):,} panoramas collectés")
-        self.log_and_print(f"⏱️ Temps total: {total_time:.1f}s")
-        self.log_and_print(f"⚡ Vitesse moyenne: {avg_speed:.1f} panoramas/seconde")
-        self.log_and_print(f"🌐 Requêtes totales: {self.total_requests}")
-        self.log_and_print(f"❌ Erreurs: {self.errors}")
-        self.log_and_print(f"📁 Données sauvées dans: {self.output_dir}")
+        self.log_and_print(f"\n🎉 Scraping completed!")
+        self.log_and_print(f"📊 {len(self.visited):,} panoramas collected")
+        self.log_and_print(f"⏱️ Total time: {total_time:.1f}s")
+        self.log_and_print(f"⚡ Average speed: {avg_speed:.1f} panoramas/second")
+        self.log_and_print(f"🌐 Total requests: {self.total_requests}")
+        self.log_and_print(f"❌ Errors: {self.errors}")
+        self.log_and_print(f"📁 Data saved in: {self.output_dir}")
         
-        # Sauvegarder les statistiques finales avec métriques détaillées
+        # Save final statistics with detailed metrics
         stats = {
             'zone_id': self.zone_id,
             'zone_name': self.zone_name,
@@ -455,77 +455,77 @@ class JA360Scraper:
         with open(stats_file, 'w') as f:
             json.dump(stats, f, indent=2)
         
-        self.log_and_print(f"📊 Statistiques sauvées: {stats_file}")
-        self.log_and_print(f"📝 Log complet disponible: {self.log_path}")
+        self.log_and_print(f"📊 Statistics saved: {stats_file}")
+        self.log_and_print(f"📝 Complete log available: {self.log_path}")
 
 def parse_arguments():
-    """Parse les arguments de ligne de commande"""
+    """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='JA360 Panorama Scraper pour l\'Islande - Scrape automatiquement toutes les zones',
+        description='JA360 Panorama Scraper for Iceland - Automatically scrape all zones',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Le script scrape automatiquement les 3 zones d'Islande:
-  1 - Reykjavik (Capitale et île principale d'Islande)
-  2 - Vestmannaeyjar (Îles Vestmann, sud de l'Islande)
-  3 - Grimsey (Île de Grimsey, nord de l'Islande, cercle arctique)
+The script automatically scrapes the 3 zones of Iceland:
+  1 - Reykjavik (Capital and main island of Iceland)
+  2 - Vestmannaeyjar (Vestmann Islands, south of Iceland)
+  3 - Grimsey (Grimsey Island, north of Iceland, Arctic Circle)
 
-Utilisation:
-  python collector.py    # Scraper automatiquement toutes les zones
+Usage:
+  python collector.py    # Automatically scrape all zones
         """
     )
     
     return parser.parse_args()
 
 async def main():
-    """Fonction principale - Scrape automatiquement toutes les zones"""
+    """Main function - Automatically scrape all zones"""
     try:
-        # Parser les arguments (juste pour l'aide)
+        # Parse arguments (just for help)
         parse_arguments()
         
-        print(f"\n🇮🇸 JA360 Panorama Scraper - Mode Pipeline")
-        print(f"📁 Données sauvées dans: {OUTPUT_DIR}")
-        print(f"🎯 Scraping automatique des 3 zones d'Islande")
+        print(f"\n🇮🇸 JA360 Panorama Scraper - Pipeline Mode")
+        print(f"📁 Data saved in: {OUTPUT_DIR}")
+        print(f"🎯 Automatic scraping of 3 Iceland zones")
         
-        # Scraper toutes les zones séquentiellement
+        # Scrape all zones sequentially
         total_panoramas = 0
         start_time = time.time()
         
         for zone_id in [1, 2, 3]:  # Reykjavik, Vestmannaeyjar, Grimsey
             zone = ZONES[zone_id]
             print(f"\n{'='*50}")
-            print(f"🚀 Début du scraping: {zone['name']}")
+            print(f"🚀 Starting scraping: {zone['name']}")
             print(f"📍 {zone['description']}")
-            print(f"📍 Coordonnées: {zone['lat']}, {zone['lon']}")
+            print(f"📍 Coordinates: {zone['lat']}, {zone['lon']}")
             print(f"{'='*50}")
             
             try:
                 scraper = JA360Scraper(zone_id)
                 await scraper.scrape()
                 total_panoramas += len(scraper.visited)
-                print(f"✅ {zone['name']} terminé: {len(scraper.visited):,} panoramas collectés")
+                print(f"✅ {zone['name']} completed: {len(scraper.visited):,} panoramas collected")
                 
             except Exception as e:
-                print(f"❌ Erreur lors du scraping de {zone['name']}: {e}")
+                print(f"❌ Error during scraping of {zone['name']}: {e}")
                 import traceback
                 traceback.print_exc()
-                # Continuer avec les autres zones même en cas d'erreur
+                # Continue with other zones even in case of error
                 continue
         
-        # Statistiques finales globales
+        # Global final statistics
         total_time = time.time() - start_time
         print(f"\n{'='*60}")
-        print(f"🎉 SCRAPING COMPLET DE L'ISLANDE TERMINÉ!")
-        print(f"📊 Total panoramas collectés: {total_panoramas:,}")
-        print(f"⏱️ Temps total: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-        print(f"⚡ Vitesse moyenne globale: {total_panoramas/total_time:.1f} panoramas/seconde")
-        print(f"📁 Toutes les données sont dans: {OUTPUT_DIR}")
+        print(f"🎉 COMPLETE ICELAND SCRAPING FINISHED!")
+        print(f"📊 Total panoramas collected: {total_panoramas:,}")
+        print(f"⏱️ Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        print(f"⚡ Global average speed: {total_panoramas/total_time:.1f} panoramas/second")
+        print(f"📁 All data is in: {OUTPUT_DIR}")
         print(f"{'='*60}")
         
     except KeyboardInterrupt:
-        print(f"\n⚠️ Interruption par l'utilisateur")
+        print(f"\n⚠️ User interruption")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Erreur globale: {e}")
+        print(f"\n❌ Global error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

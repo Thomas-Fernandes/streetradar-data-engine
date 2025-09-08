@@ -2,6 +2,7 @@
 """
 JA360 Panorama Scraper - BFS Navigation
 Collecte tous les panoramas d'Islande en naviguant de voisin en voisin
+Supporte maintenant 3 zones: Reykjavik, Vestmannaeyjar et Grimsey
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import time
 import sys
 import os
 import logging
+import argparse
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -21,10 +23,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
 
 from streetlevel.ja import find_panorama_async, find_panorama_by_id_async
 
+# Configuration des zones
+ZONES = {
+    1: {
+        'name': 'Reykjavik',
+        'lat': 64.1355,
+        'lon': -21.8954,
+        'description': 'Capitale et île principale d\'Islande',
+        'search_radius': 100
+    },
+    2: {
+        'name': 'Vestmannaeyjar',
+        'lat': 63.4377,
+        'lon': -20.2670,
+        'description': 'Îles Vestmann - Heimaey (sud de l\'Islande)',
+        'search_radius': 500  # Rayon plus large pour les îles isolées
+    },
+    3: {
+        'name': 'Grimsey',
+        'lat': 66.5442,  # Coordonnées converties depuis ISN93 x=543713, y=671978
+        'lon': -18.0133, 
+        'description': 'Île de Grimsey - Point avec panoramas confirmés (cercle arctique)',
+        'search_radius': 500  # Rayon plus large pour les îles isolées
+    }
+}
+
 # Configuration
 OUTPUT_DIR = Path("../../data/ja360/raw")
-REYKJAVIK_LAT = 64.1355
-REYKJAVIK_LON = -21.8954
 SEARCH_RADIUS = 100  # mètres
 BATCH_SIZE = 2500  # Sauvegarder tous les 2500 panoramas (optimisé pour I/O)
 MAX_CONCURRENT = 75  # Requêtes simultanées (réduit pour éviter 504)
@@ -34,7 +59,12 @@ MONITORING_INTERVAL = 10.0  # Intervalle des logs de monitoring en temps réel (
 BATCH_DELAY = 0.1  # Délai entre les batches pour éviter de surcharger le serveur (secondes)
 
 class JA360Scraper:
-    def __init__(self):
+    def __init__(self, zone_id: int):
+        self.zone_id = zone_id
+        self.zone = ZONES[zone_id]
+        self.zone_name = self.zone['name']
+        
+        # Utiliser directement le dossier raw sans sous-dossiers
         self.output_dir = OUTPUT_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -58,9 +88,10 @@ class JA360Scraper:
         # Semaphore pour limiter la concurrence
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         
-        self.log_and_print(f"🇮🇸 JA360 Panorama Scraper - Version Optimisée")
+        self.log_and_print(f"🇮🇸 JA360 Panorama Scraper - Zone: {self.zone_name}")
+        self.log_and_print(f"📍 {self.zone['description']}")
         self.log_and_print(f"📁 Sortie: {self.output_dir}")
-        self.log_and_print(f"🎯 Point de départ: Reykjavik ({REYKJAVIK_LAT}, {REYKJAVIK_LON})")
+        self.log_and_print(f"🎯 Point de départ: {self.zone_name} ({self.zone['lat']}, {self.zone['lon']})")
         self.log_and_print(f"⚡ Concurrence: {MAX_CONCURRENT} requêtes simultanées")
         self.log_and_print(f"⏱️ Timeout réseau: {NETWORK_TIMEOUT}s")
         self.log_and_print(f"💾 Taille des batches: {BATCH_SIZE} panoramas")
@@ -72,7 +103,7 @@ class JA360Scraper:
         """Configure le système de logging"""
         # Créer le nom du fichier de log avec timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"ja360_scraper_{timestamp}.log"
+        log_filename = f"ja360_scraper_{self.zone_name.lower()}_{timestamp}.log"
         log_path = self.output_dir / log_filename
         
         # Configuration du logger
@@ -181,17 +212,33 @@ class JA360Scraper:
                 return None
     
     async def find_starting_panorama(self, session: aiohttp.ClientSession) -> Optional[int]:
-        """Trouve le panorama de départ à Reykjavik"""
-        self.log_and_print(f"🔍 Recherche du panorama de départ...")
+        """Trouve le panorama de départ dans la zone sélectionnée"""
+        search_radius = self.zone.get('search_radius', SEARCH_RADIUS)
+        self.log_and_print(f"🔍 Recherche du panorama de départ à {self.zone_name}...")
+        self.log_and_print(f"📐 Rayon de recherche initial: {search_radius}m")
         
         try:
-            pano = await find_panorama_async(REYKJAVIK_LAT, REYKJAVIK_LON, session, SEARCH_RADIUS)
+            # Première tentative avec le rayon normal
+            pano = await find_panorama_async(self.zone['lat'], self.zone['lon'], session, search_radius)
             if pano:
                 self.log_and_print(f"✅ Panorama de départ trouvé: {pano.id} à ({pano.lat:.4f}, {pano.lon:.4f})")
                 return pano.id
+            
+            # Pour les îles isolées, essayer avec un rayon plus large
+            if self.zone_id in [2, 3]:  # Vestmannaeyjar et Grimsey
+                extended_radius = 1000  # 1km
+                self.log_and_print(f"🔍 Tentative avec rayon étendu: {extended_radius}m...")
+                pano = await find_panorama_async(self.zone['lat'], self.zone['lon'], session, extended_radius)
+                if pano:
+                    self.log_and_print(f"✅ Panorama de départ trouvé (rayon étendu): {pano.id} à ({pano.lat:.4f}, {pano.lon:.4f})")
+                    return pano.id
+            
+            self.log_and_print(f"❌ Aucun panorama trouvé à {self.zone_name} (rayons testés: {search_radius}m", "error")
+            if self.zone_id in [2, 3]:
+                self.log_and_print(f"   et {extended_radius}m)", "error")
             else:
-                self.log_and_print(f"❌ Aucun panorama trouvé à Reykjavik", "error")
-                return None
+                self.log_and_print(")", "error")
+            return None
                 
         except Exception as e:
             self.log_and_print(f"❌ Erreur recherche initiale: {e}", "error")
@@ -384,6 +431,9 @@ class JA360Scraper:
         
         # Sauvegarder les statistiques finales avec métriques détaillées
         stats = {
+            'zone_id': self.zone_id,
+            'zone_name': self.zone_name,
+            'zone_description': self.zone['description'],
             'total_panoramas': len(self.visited),
             'total_time': total_time,
             'avg_speed': avg_speed,
@@ -391,7 +441,7 @@ class JA360Scraper:
             'errors': self.errors,
             'timeouts': self.timeouts,
             'success_rate': (self.total_requests - self.errors) / self.total_requests * 100 if self.total_requests > 0 else 0,
-            'start_coordinates': [REYKJAVIK_LAT, REYKJAVIK_LON],
+            'start_coordinates': [self.zone['lat'], self.zone['lon']],
             'completion_time': datetime.now().isoformat(),
             'config': {
                 'max_concurrent': MAX_CONCURRENT,
@@ -408,17 +458,74 @@ class JA360Scraper:
         self.log_and_print(f"📊 Statistiques sauvées: {stats_file}")
         self.log_and_print(f"📝 Log complet disponible: {self.log_path}")
 
+def parse_arguments():
+    """Parse les arguments de ligne de commande"""
+    parser = argparse.ArgumentParser(
+        description='JA360 Panorama Scraper pour l\'Islande - Scrape automatiquement toutes les zones',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Le script scrape automatiquement les 3 zones d'Islande:
+  1 - Reykjavik (Capitale et île principale d'Islande)
+  2 - Vestmannaeyjar (Îles Vestmann, sud de l'Islande)
+  3 - Grimsey (Île de Grimsey, nord de l'Islande, cercle arctique)
+
+Utilisation:
+  python collector.py    # Scraper automatiquement toutes les zones
+        """
+    )
+    
+    return parser.parse_args()
+
 async def main():
-    """Fonction principale"""
+    """Fonction principale - Scrape automatiquement toutes les zones"""
     try:
-        scraper = JA360Scraper()
-        await scraper.scrape()
+        # Parser les arguments (juste pour l'aide)
+        parse_arguments()
+        
+        print(f"\n🇮🇸 JA360 Panorama Scraper - Mode Pipeline")
+        print(f"📁 Données sauvées dans: {OUTPUT_DIR}")
+        print(f"🎯 Scraping automatique des 3 zones d'Islande")
+        
+        # Scraper toutes les zones séquentiellement
+        total_panoramas = 0
+        start_time = time.time()
+        
+        for zone_id in [1, 2, 3]:  # Reykjavik, Vestmannaeyjar, Grimsey
+            zone = ZONES[zone_id]
+            print(f"\n{'='*50}")
+            print(f"🚀 Début du scraping: {zone['name']}")
+            print(f"📍 {zone['description']}")
+            print(f"📍 Coordonnées: {zone['lat']}, {zone['lon']}")
+            print(f"{'='*50}")
+            
+            try:
+                scraper = JA360Scraper(zone_id)
+                await scraper.scrape()
+                total_panoramas += len(scraper.visited)
+                print(f"✅ {zone['name']} terminé: {len(scraper.visited):,} panoramas collectés")
+                
+            except Exception as e:
+                print(f"❌ Erreur lors du scraping de {zone['name']}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continuer avec les autres zones même en cas d'erreur
+                continue
+        
+        # Statistiques finales globales
+        total_time = time.time() - start_time
+        print(f"\n{'='*60}")
+        print(f"🎉 SCRAPING COMPLET DE L'ISLANDE TERMINÉ!")
+        print(f"📊 Total panoramas collectés: {total_panoramas:,}")
+        print(f"⏱️ Temps total: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        print(f"⚡ Vitesse moyenne globale: {total_panoramas/total_time:.1f} panoramas/seconde")
+        print(f"📁 Toutes les données sont dans: {OUTPUT_DIR}")
+        print(f"{'='*60}")
         
     except KeyboardInterrupt:
         print(f"\n⚠️ Interruption par l'utilisateur")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Erreur: {e}")
+        print(f"\n❌ Erreur globale: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

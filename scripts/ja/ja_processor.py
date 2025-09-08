@@ -15,7 +15,7 @@ from datetime import datetime
 import glob
 
 # Configuration
-INPUT_DIR = Path("../../data/ja360/panoramas")
+INPUT_DIR = Path("../../data/ja360/raw")
 OUTPUT_DIR = Path("../../data/ja360/processed") 
 OUTPUT_FILENAME = "ja360_iceland_panoramas.geojson"
 

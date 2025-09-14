@@ -11,3 +11,7 @@ pyexiv2
 pyarrow
 psutil
 mapbox-vector-tile
+geopandas
+shapely
+numpy
+pandas

@@ -1,23 +1,24 @@
-#!/usr/bin/env python3
 """
 JA360 Coverage Generator
-Snaps JA360 panoramas to OSM road network and generates coverage LineStrings
 
-This script implements the algorithm to:
-1. Load JA360 panoramas and OSM road network
-2. Snap each panorama to the closest OSM edge using distance + heading
-3. Generate coverage intervals along roads
-4. Create LineString segments for covered portions
-5. Export snapped points and coverage lines
+Snaps JA360 panoramas to OSM road network and generates coverage analysis.
+
+This script implements a comprehensive algorithm to:
+1. Load JA360 panoramas and OSM road network data
+2. Snap each panorama to the closest OSM edge using distance and heading criteria
+3. Calculate coverage intervals along roads based on snapped panoramas
+4. Generate both detailed segments and complete road coverage representations
+5. Export results with comprehensive statistics
 
 Input:
 - JA360 panoramas GeoJSON (from ja_processor.py)
-- OSM road network (PBF file or preprocessed GPKG)
+- OSM road network (GPKG file)
 
 Output:
-- panos_snapped.parquet: snapped panorama assignments
-- coverage_lines.gpkg: covered road segments
-- coverage_lines.geojson: same as above in GeoJSON format
+- roads.geojson: Complete OSM roads with coverage
+- segments.geojson: Detailed coverage segments
+- stats.json: Comprehensive coverage statistics
+- panos_snapped.parquet: Technical panorama assignments
 """
 
 import os
@@ -45,6 +46,12 @@ from pyproj import CRS, Transformer
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Constants
+DEFAULT_CRS_SOURCE = 'EPSG:4326'  # WGS84
+DEFAULT_CRS_TARGET = 'EPSG:3857'  # Web Mercator (meters)
+PROGRESS_BATCH_SIZE = 50000       # Default batch size for progress reporting
+DEFAULT_BEARING_TOLERANCE = 1e-6  # Tolerance for bearing calculations
 
 
 @dataclass
@@ -84,7 +91,21 @@ class SnapConfig:
 
 
 class JA360CoverageGenerator:
-    """Main class for generating JA360 coverage from panorama data"""
+    """
+    Main class for generating JA360 coverage analysis from panorama data.
+    
+    This class handles the complete pipeline from raw panorama and OSM data
+    to comprehensive coverage analysis with multiple output formats.
+    
+    The workflow includes:
+    1. Loading and preprocessing OSM road network data
+    2. Loading and validating panorama data
+    3. Building spatial indices for efficient querying
+    4. Snapping panoramas to road network using distance and heading criteria
+    5. Calculating coverage intervals along roads
+    6. Generating both detailed segments and complete road representations
+    7. Exporting results with comprehensive statistics
+    """
     
     def __init__(self, config: SnapConfig = None):
         self.config = config or SnapConfig()
@@ -97,8 +118,8 @@ class JA360CoverageGenerator:
         self.intervals_by_edge = defaultdict(list)
         
         # CRS management
-        self.source_crs = 'EPSG:4326'  # WGS84
-        self.target_crs = 'EPSG:3857'  # Web Mercator (meters)
+        self.source_crs = DEFAULT_CRS_SOURCE
+        self.target_crs = DEFAULT_CRS_TARGET
         self.transformer_to_metric = None
         self.transformer_to_wgs84 = None
         
@@ -129,6 +150,50 @@ class JA360CoverageGenerator:
         
         return logger
     
+    def _validate_file_exists(self, file_path: Union[str, Path], file_type: str) -> Path:
+        """
+        Validate that a file exists and return Path object.
+        
+        Args:
+            file_path: Path to file to validate
+            file_type: Description of file type for error messages
+            
+        Returns:
+            Validated Path object
+            
+        Raises:
+            FileNotFoundError: If file does not exist
+        """
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"{file_type} file not found: {path}")
+        return path
+    
+    def _validate_geodataframe(self, gdf: gpd.GeoDataFrame, required_columns: List[str], data_type: str):
+        """
+        Validate that a GeoDataFrame has required columns and valid geometry.
+        
+        Args:
+            gdf: GeoDataFrame to validate
+            required_columns: List of required column names
+            data_type: Description of data type for error messages
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        # Check for required columns
+        missing_cols = [col for col in required_columns if col not in gdf.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns in {data_type}: {missing_cols}")
+        
+        # Check for valid geometry
+        if 'geometry' not in gdf.columns:
+            raise ValueError(f"Missing 'geometry' column in {data_type}")
+        
+        # Check for empty dataset
+        if len(gdf) == 0:
+            raise ValueError(f"Empty {data_type} dataset")
+    
     def _setup_crs_transformers(self):
         """Setup CRS transformers for coordinate conversion"""
         # Create transformers
@@ -151,11 +216,8 @@ class JA360CoverageGenerator:
         Returns:
             GeoDataFrame with prepared road network
         """
-        osm_path = Path(osm_file)
+        osm_path = self._validate_file_exists(osm_file, "OSM network")
         self.logger.info(f"🛣️  Loading OSM network from {osm_path}")
-        
-        if not osm_path.exists():
-            raise FileNotFoundError(f"OSM file not found: {osm_path}")
         
         start_time = time.time()
         
@@ -180,13 +242,11 @@ class JA360CoverageGenerator:
         else:
             raise ValueError(f"Unsupported file format: {osm_path.suffix}")
         
-        # Ensure we have required columns
+        # Validate required columns
         required_cols = ['geometry']
         optional_cols = ['highway', 'name', 'ref', 'oneway', 'osm_id', 'way_id']
         
-        for col in required_cols:
-            if col not in gdf.columns:
-                raise ValueError(f"Required column '{col}' not found in OSM data")
+        self._validate_geodataframe(gdf, required_cols, "OSM network data")
         
         # Add missing optional columns
         for col in optional_cols:
@@ -482,7 +542,7 @@ class JA360CoverageGenerator:
         successful_snaps = 0
         
         # Process panoramas in batches for progress reporting
-        batch_size = 10000
+        batch_size = 10000  # Processing batch size for memory efficiency
         total_panos = len(self.panos_gdf)
         
         for i in range(0, total_panos, batch_size):
@@ -523,7 +583,7 @@ class JA360CoverageGenerator:
                     successful_snaps += 1
             
             # Progress report
-            if i + batch_size >= total_panos or (i + batch_size) % 50000 == 0:
+            if i + batch_size >= total_panos or (i + batch_size) % PROGRESS_BATCH_SIZE == 0:
                 progress = min(batch_end, total_panos)
                 elapsed = time.time() - start_time
                 rate = progress / elapsed if elapsed > 0 else 0
@@ -670,6 +730,71 @@ class JA360CoverageGenerator:
         
         return segments_gdf
     
+    def create_covered_roads(self) -> gpd.GeoDataFrame:
+        """Create coverage representation using complete OSM LineStrings that have coverage"""
+        self.logger.info("🛣️  Creating covered roads (complete LineStrings)...")
+        start_time = time.time()
+        
+        covered_roads = []
+        
+        for edge_id, intervals in self.intervals_by_edge.items():
+            # Get edge info
+            edge_row = self.edges_gdf[self.edges_gdf.edge_id == edge_id].iloc[0]
+            
+            # Calculate total coverage statistics for this edge
+            total_coverage_length = sum(end_s - start_s for start_s, end_s, n_points in intervals)
+            total_points = sum(n_points for start_s, end_s, n_points in intervals)
+            edge_length = edge_row.length_m
+            
+            # Only include edges with meaningful coverage
+            if total_coverage_length < self.config.min_segment_length:
+                continue
+                
+            coverage_ratio = total_coverage_length / edge_length if edge_length > 0 else 0
+            density = total_points / total_coverage_length if total_coverage_length > 0 else 0
+            
+            covered_road = {
+                'edge_id': edge_id,
+                'way_id': edge_row.get('way_id'),
+                'highway': edge_row.get('highway'),
+                'name': edge_row.get('name'),
+                'ref': edge_row.get('ref'),
+                'oneway': edge_row.get('oneway'),
+                'edge_length': edge_length,
+                'coverage_length': total_coverage_length,
+                'coverage_ratio': coverage_ratio,
+                'n_points': total_points,
+                'density': density,
+                'n_intervals': len(intervals),
+                'geometry': edge_row.geometry
+            }
+            
+            covered_roads.append(covered_road)
+        
+        # Create GeoDataFrame
+        if covered_roads:
+            roads_gdf = gpd.GeoDataFrame(covered_roads, crs=self.target_crs)
+        else:
+            # Create empty GeoDataFrame with correct schema
+            roads_gdf = gpd.GeoDataFrame(columns=[
+                'edge_id', 'way_id', 'highway', 'name', 'ref', 'oneway',
+                'edge_length', 'coverage_length', 'coverage_ratio', 
+                'n_points', 'density', 'n_intervals'
+            ], geometry=gpd.GeoSeries([], name='geometry'), crs=self.target_crs)
+        
+        elapsed = time.time() - start_time
+        self.logger.info(f"✅ Covered roads created in {elapsed:.1f}s")
+        self.logger.info(f"📊 {len(roads_gdf):,} roads with coverage")
+        
+        if len(roads_gdf) > 0:
+            total_length = roads_gdf['edge_length'].sum() / 1000  # km
+            covered_length = roads_gdf['coverage_length'].sum() / 1000  # km
+            self.logger.info(f"📏 Total road length: {total_length:.1f} km")
+            self.logger.info(f"📏 Covered length: {covered_length:.1f} km")
+            self.logger.info(f"📊 Average coverage ratio: {roads_gdf['coverage_ratio'].mean():.1%}")
+        
+        return roads_gdf
+    
     def dissolve_adjacent_segments(self, segments_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Dissolve adjacent segments with same attributes"""
         if len(segments_gdf) == 0:
@@ -683,9 +808,6 @@ class JA360CoverageGenerator:
         # Only use columns that exist
         group_cols = [col for col in group_cols if col in segments_gdf.columns]
         
-        self.logger.info(f"🔍 Available columns: {list(segments_gdf.columns)}")
-        self.logger.info(f"🔍 Group columns: {group_cols}")
-        
         if not group_cols:
             self.logger.info("⚠️  No valid grouping columns found, returning original segments")
             return segments_gdf
@@ -698,7 +820,6 @@ class JA360CoverageGenerator:
         
         dissolved_segments = []
         total_groups = segments_copy.groupby(group_cols).ngroups
-        self.logger.info(f"🔍 Processing {total_groups} groups")
         
         for group_idx, (group_vals, group_df) in enumerate(segments_copy.groupby(group_cols)):
             # Sort by start_s
@@ -741,7 +862,6 @@ class JA360CoverageGenerator:
                     
                     dissolved_segments.append(dissolved_segment)
         
-        self.logger.info(f"🔍 Created {len(dissolved_segments)} dissolved segments")
         
         # Convert list of series to DataFrame first
         if dissolved_segments:
@@ -758,8 +878,8 @@ class JA360CoverageGenerator:
         
         return dissolved_gdf
     
-    def export_results(self, assignments_df: pd.DataFrame, coverage_gdf: gpd.GeoDataFrame, 
-                      output_dir: Union[str, Path]):
+    def export_results(self, assignments_df: pd.DataFrame, coverage_segments_gdf: gpd.GeoDataFrame,
+                      covered_roads_gdf: gpd.GeoDataFrame, output_dir: Union[str, Path]):
         """Export results to files"""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -771,48 +891,85 @@ class JA360CoverageGenerator:
         assignments_df.to_parquet(assignments_file, index=False)
         self.logger.info(f"✅ Assignments saved: {assignments_file}")
         
-        # Convert coverage to WGS84 for export
-        if len(coverage_gdf) > 0:
-            coverage_wgs84 = coverage_gdf.to_crs(self.source_crs)
-            
-            # Export coverage as GPKG
-            coverage_gpkg = output_path / "coverage_lines.gpkg"
-            coverage_wgs84.to_file(coverage_gpkg, driver='GPKG')
-            self.logger.info(f"✅ Coverage GPKG saved: {coverage_gpkg}")
-            
-            # Export coverage as GeoJSON
-            coverage_geojson = output_path / "coverage_lines.geojson"
-            coverage_wgs84.to_file(coverage_geojson, driver='GeoJSON')
-            self.logger.info(f"✅ Coverage GeoJSON saved: {coverage_geojson}")
+        # Export coverage segments as GeoJSON only
+        if len(coverage_segments_gdf) > 0:
+            coverage_wgs84 = coverage_segments_gdf.to_crs(self.source_crs)
+            segments_geojson = output_path / "segments.geojson"
+            coverage_wgs84.to_file(segments_geojson, driver='GeoJSON')
+            self.logger.info(f"✅ Coverage segments saved: {segments_geojson}")
         
-        # Export summary statistics
-        stats = {
-            'generation_info': {
-                'timestamp': datetime.now().isoformat(),
-                'total_panoramas': len(self.panos_gdf),
-                'snapped_panoramas': len(assignments_df),
-                'coverage_segments': len(coverage_gdf),
-                'snap_success_rate': len(assignments_df) / len(self.panos_gdf) * 100
-            },
-            'quality_distribution': assignments_df['match_quality'].value_counts().to_dict(),
-            'coverage_statistics': {
-                'total_segments': len(coverage_gdf),
-                'total_length_km': coverage_gdf['segment_length'].sum() / 1000 if len(coverage_gdf) > 0 else 0,
-                'avg_segment_length_m': coverage_gdf['segment_length'].mean() if len(coverage_gdf) > 0 else 0,
-                'avg_point_density': coverage_gdf['density'].mean() if len(coverage_gdf) > 0 else 0
-            },
-            'parameters': {
-                'search_radius_m': self.config.r_query,
-                'max_snap_distance_m': self.config.d_max,
-                'max_heading_deviation_deg': self.config.theta_max,
-                'coverage_radius_m': self.config.coverage_radius
-            }
-        }
+        # Export covered roads as GeoJSON only
+        if len(covered_roads_gdf) > 0:
+            roads_wgs84 = covered_roads_gdf.to_crs(self.source_crs)
+            roads_geojson = output_path / "roads.geojson"
+            roads_wgs84.to_file(roads_geojson, driver='GeoJSON')
+            self.logger.info(f"✅ Covered roads saved: {roads_geojson}")
         
-        stats_file = output_path / "coverage_statistics.json"
+        # Calculate comprehensive statistics
+        stats = self._calculate_processing_statistics(assignments_df, coverage_segments_gdf, covered_roads_gdf)
+        
+        stats_file = output_path / "stats.json"
         with open(stats_file, 'w', encoding='utf-8') as f:
             json.dump(stats, f, indent=2, ensure_ascii=False)
         self.logger.info(f"✅ Statistics saved: {stats_file}")
+    
+    def _calculate_processing_statistics(self, assignments_df: pd.DataFrame, 
+                                       coverage_segments_gdf: gpd.GeoDataFrame,
+                                       covered_roads_gdf: gpd.GeoDataFrame) -> Dict:
+        """
+        Calculate comprehensive processing statistics.
+        
+        Args:
+            assignments_df: Panorama assignments DataFrame
+            coverage_segments_gdf: Coverage segments GeoDataFrame
+            covered_roads_gdf: Covered roads GeoDataFrame
+            
+        Returns:
+            Dictionary with comprehensive statistics
+        """
+        total_panoramas = len(self.panos_gdf)
+        snapped_panoramas = len(assignments_df)
+        snap_rate = snapped_panoramas / total_panoramas * 100 if total_panoramas > 0 else 0
+        
+        # Road statistics
+        total_roads = len(covered_roads_gdf) if len(covered_roads_gdf) > 0 else 0
+        total_road_km = covered_roads_gdf['edge_length'].sum() / 1000 if len(covered_roads_gdf) > 0 else 0
+        covered_km = covered_roads_gdf['coverage_length'].sum() / 1000 if len(covered_roads_gdf) > 0 else 0
+        avg_coverage_ratio = covered_roads_gdf['coverage_ratio'].mean() if len(covered_roads_gdf) > 0 else 0
+        
+        # Segment statistics  
+        total_segments = len(coverage_segments_gdf) if len(coverage_segments_gdf) > 0 else 0
+        segments_km = coverage_segments_gdf['segment_length'].sum() / 1000 if len(coverage_segments_gdf) > 0 else 0
+        
+        # Quality distribution
+        quality_dist = assignments_df['match_quality'].value_counts().to_dict() if len(assignments_df) > 0 else {}
+        
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'panoramas': {
+                'total': total_panoramas,
+                'snapped': snapped_panoramas, 
+                'snap_success_rate_percent': round(snap_rate, 1)
+            },
+            'roads': {
+                'total_covered_roads': total_roads,
+                'total_road_length_km': round(total_road_km, 1),
+                'covered_length_km': round(covered_km, 1),
+                'coverage_ratio_percent': round(avg_coverage_ratio * 100, 1) if avg_coverage_ratio > 0 else 0
+            },
+            'segments': {
+                'total_segments': total_segments,
+                'total_length_km': round(segments_km, 1)
+            },
+            'quality_distribution': quality_dist,
+            'processing_parameters': {
+                'search_radius_m': self.config.r_query,
+                'max_snap_distance_m': self.config.d_max,
+                'max_heading_deviation_deg': self.config.theta_max,
+                'coverage_radius_m': self.config.coverage_radius,
+                'min_segment_length_m': self.config.min_segment_length
+            }
+        }
     
     def process(self, osm_file: Union[str, Path], panoramas_file: Union[str, Path], 
                 output_dir: Union[str, Path]):
@@ -847,16 +1004,19 @@ class JA360CoverageGenerator:
             # 4. Calculate coverage intervals
             self.calculate_coverage_intervals()
             
-            # 5. Create coverage segments
-            coverage_gdf = self.create_coverage_segments()
+            # 5a. Create coverage segments (fractioned approach)
+            coverage_segments_gdf = self.create_coverage_segments()
             
-            # 6. Dissolve adjacent segments
-            if len(coverage_gdf) > 0:
-                coverage_gdf = self.dissolve_adjacent_segments(coverage_gdf)
+            # 5b. Create covered roads (complete LineStrings approach)
+            covered_roads_gdf = self.create_covered_roads()
+            
+            # 6. Dissolve adjacent segments (for fractioned approach)
+            if len(coverage_segments_gdf) > 0:
+                coverage_segments_gdf = self.dissolve_adjacent_segments(coverage_segments_gdf)
             
             # 7. Export results
             assignments_df = pd.DataFrame(self.assignments)
-            self.export_results(assignments_df, coverage_gdf, output_dir)
+            self.export_results(assignments_df, coverage_segments_gdf, covered_roads_gdf, output_dir)
             
             # Final summary
             total_elapsed = time.time() - total_start
@@ -864,10 +1024,15 @@ class JA360CoverageGenerator:
             self.logger.info(f"📊 Summary:")
             self.logger.info(f"   • {len(self.panos_gdf):,} input panoramas")
             self.logger.info(f"   • {len(assignments_df):,} successfully snapped")
-            self.logger.info(f"   • {len(coverage_gdf):,} coverage segments generated")
-            if len(coverage_gdf) > 0:
-                total_km = coverage_gdf['segment_length'].sum() / 1000
-                self.logger.info(f"   • {total_km:.1f} km total coverage")
+            self.logger.info(f"   • {len(coverage_segments_gdf):,} coverage segments generated")
+            self.logger.info(f"   • {len(covered_roads_gdf):,} covered roads identified")
+            if len(coverage_segments_gdf) > 0:
+                segments_km = coverage_segments_gdf['segment_length'].sum() / 1000
+                self.logger.info(f"   • {segments_km:.1f} km total segment coverage")
+            if len(covered_roads_gdf) > 0:
+                roads_km = covered_roads_gdf['coverage_length'].sum() / 1000
+                total_roads_km = covered_roads_gdf['edge_length'].sum() / 1000
+                self.logger.info(f"   • {roads_km:.1f} km covered on {total_roads_km:.1f} km of roads")
             
         except Exception as e:
             self.logger.error(f"❌ Processing failed: {e}")
@@ -882,7 +1047,7 @@ def main():
     # Configuration
     base_dir = Path("../../data/ja360")
     processed_dir = base_dir / "processed"
-    output_dir = base_dir / "coverage"
+    output_dir = base_dir / "usage"
     
     # Input files
     panoramas_file = processed_dir / "ja360_iceland_panoramas.geojson"

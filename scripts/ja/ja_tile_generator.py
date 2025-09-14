@@ -106,43 +106,43 @@ class TileConfig:
             yellow_rgb = (251, 190, 1)
             
             self.styles = [
-                # Low zooms: thin lines, minimal halo
+                # Low zooms: thin lines, almost no halo
                 TileStyle(
                     zoom_range=(1, 3),
                     line_width=1.0,
-                    halo_width=0.3,  # Very thin halo
+                    halo_width=0.1,  # Almost invisible halo
                     line_color=(*yellow_rgb, 255),      # Yellow
-                    halo_color=(255, 255, 255, 150)     # White halo (reduced opacity)
+                    halo_color=(255, 255, 255, 60)      # Very transparent halo
                 ),
-                # Medium-low zooms: slightly thicker, minimal halo
+                # Medium-low zooms: slightly thicker, very minimal halo
                 TileStyle(
                     zoom_range=(4, 6),
                     line_width=1.2,
-                    halo_width=0.4,  # Thin halo
+                    halo_width=0.15,  # Almost invisible halo
                     line_color=(*yellow_rgb, 255),
-                    halo_color=(255, 255, 255, 180)
+                    halo_color=(255, 255, 255, 80)
                 ),
-                # Medium zooms: normal thickness, normal halo
+                # Medium zooms: normal thickness, minimal halo
                 TileStyle(
                     zoom_range=(7, 9),
                     line_width=1.6,
-                    halo_width=0.6,  # Normal halo
+                    halo_width=0.2,  # Very thin halo
                     line_color=(*yellow_rgb, 255),
-                    halo_color=(255, 255, 255, 200)
+                    halo_color=(255, 255, 255, 100)
                 ),
-                # High zooms: thicker lines, full halo
+                # High zooms: thicker lines, very minimal halo
                 TileStyle(
-                    zoom_range=(10, 13),
+                    zoom_range=(10, 11),
                     line_width=2.0,
-                    halo_width=0.8,  # Full halo
+                    halo_width=0.25,  # Very thin halo
                     line_color=(*yellow_rgb, 255),
-                    halo_color=(255, 255, 255, 200)
+                    halo_color=(255, 255, 255, 120)
                 ),
-                # Very high zooms: thickest lines, full halo
+                # Very high zooms: thickest lines, minimal halo
                 TileStyle(
-                    zoom_range=(14, 16),
+                    zoom_range=(12, 16),
                     line_width=2.5,
-                    halo_width=1.0,  # Full halo
+                    halo_width=0.6,  # Thin halo
                     line_color=(*yellow_rgb, 255),
                     halo_color=(255, 255, 255, 200)
                 )

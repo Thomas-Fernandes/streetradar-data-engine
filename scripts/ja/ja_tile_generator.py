@@ -46,11 +46,13 @@ import geopandas as gpd
 from shapely.geometry import Point, LineString, MultiLineString, Polygon, box
 from shapely.strtree import STRtree
 from shapely.ops import transform
+from shapely import clip_by_rect
 import pyproj
 from pyproj import CRS, Transformer
 
 from PIL import Image, ImageDraw, ImageOps
 import io
+import cairo
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -95,8 +97,8 @@ class TileConfig:
     styles: List[TileStyle] = None
     
     # Output options
-    generate_empty_tiles: bool = True  # Generate transparent PNG for empty tiles
-    optimize_png: bool = True          # Use PNG palette optimization
+    generate_empty_tiles: bool = False  # Skip empty tiles for performance
+    optimize_png: bool = False          # Disable PNG optimization during rendering
     
     def __post_init__(self):
         if self.styles is None:
@@ -219,7 +221,7 @@ class WebMercatorTileCalculator:
 
 
 class GeometryRenderer:
-    """Renders geometries to PIL Images with antialiasing and styles"""
+    """Renders geometries using PyCairo for high performance"""
     
     def __init__(self, tile_size: int = TILE_SIZE):
         self.tile_size = tile_size
@@ -255,63 +257,72 @@ class GeometryRenderer:
     def render_linestrings(self, linestrings: List[LineString], 
                           bbox_meters: Tuple[float, float, float, float],
                           style: TileStyle) -> Image.Image:
-        """Render LineStrings to PIL Image with given style"""
-        # Create image with higher resolution for antialiasing
-        aa_factor = 2  # 2x supersampling
-        aa_size = self.tile_size * aa_factor
+        """Render LineStrings using PyCairo for high performance"""
+        # Create Cairo surface
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.tile_size, self.tile_size)
+        ctx = cairo.Context(surface)
         
-        # Create high-res image
-        img_aa = Image.new('RGBA', (aa_size, aa_size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img_aa)
-        
-        # Scale style parameters for high-res rendering
-        line_width_aa = style.line_width * aa_factor
-        halo_width_aa = style.halo_width * aa_factor
+        # Set up context for high quality rendering
+        ctx.set_antialias(cairo.ANTIALIAS_BEST)
+        ctx.set_line_join(cairo.LINE_JOIN_ROUND)
+        ctx.set_line_cap(cairo.LINE_CAP_ROUND)
         
         # Render each LineString
         for linestring in linestrings:
             try:
                 pixel_coords = self.linestring_to_pixel_coords(linestring, bbox_meters)
                 
-                # Scale coordinates for high-res rendering
-                pixel_coords_aa = [(x * aa_factor, y * aa_factor) for x, y in pixel_coords]
-                
-                if len(pixel_coords_aa) < 2:
+                if len(pixel_coords) < 2:
                     continue
                 
                 # Draw halo first (if enabled)
-                if halo_width_aa > 0:
-                    total_width = line_width_aa + 2 * halo_width_aa
-                    draw.line(pixel_coords_aa, fill=style.halo_color, width=int(total_width), 
-                             joint='round')
+                if style.halo_width > 0:
+                    ctx.set_line_width(style.line_width + 2 * style.halo_width)
+                    ctx.set_source_rgba(
+                        style.halo_color[0] / 255.0,
+                        style.halo_color[1] / 255.0,
+                        style.halo_color[2] / 255.0,
+                        style.halo_color[3] / 255.0
+                    )
+                    
+                    # Draw halo path
+                    ctx.new_path()
+                    ctx.move_to(pixel_coords[0][0], pixel_coords[0][1])
+                    for x, y in pixel_coords[1:]:
+                        ctx.line_to(x, y)
+                    ctx.stroke()
                 
                 # Draw main line
-                draw.line(pixel_coords_aa, fill=style.line_color, width=int(line_width_aa), 
-                         joint='round')
+                ctx.set_line_width(style.line_width)
+                ctx.set_source_rgba(
+                    style.line_color[0] / 255.0,
+                    style.line_color[1] / 255.0,
+                    style.line_color[2] / 255.0,
+                    style.line_color[3] / 255.0
+                )
+                
+                # Draw main line path
+                ctx.new_path()
+                ctx.move_to(pixel_coords[0][0], pixel_coords[0][1])
+                for x, y in pixel_coords[1:]:
+                    ctx.line_to(x, y)
+                ctx.stroke()
                 
             except Exception as e:
                 # Skip problematic geometries
                 continue
         
-        # Downsample for antialiasing
-        img_final = img_aa.resize((self.tile_size, self.tile_size), Image.LANCZOS)
+        # Convert Cairo surface to PIL Image
+        buf = surface.get_data()
+        img = Image.frombuffer("RGBA", (self.tile_size, self.tile_size), buf, "raw", "BGRA", 0, 1)
         
-        return img_final
+        return img
     
     def optimize_png(self, img: Image.Image) -> bytes:
-        """Optimize PNG using palette compression"""
-        # Convert to palette mode if possible (for smaller file size)
-        try:
-            # Only convert if image has limited colors
-            img_palette = img.convert('P', palette=Image.ADAPTIVE, colors=256)
-            # Ensure transparency is preserved
-            img_palette = img_palette.convert('RGBA')
-        except:
-            img_palette = img
-        
-        # Save to bytes
+        """Fast PNG export without optimization (for performance)"""
+        # Save directly without palette conversion for speed
         buffer = io.BytesIO()
-        img_palette.save(buffer, format='PNG', optimize=True)
+        img.save(buffer, format='PNG', optimize=False, compress_level=1)
         return buffer.getvalue()
 
 
@@ -477,29 +488,32 @@ class JA360TileGenerator:
         try:
             candidate_indices = tree.query(query_polygon_wm)
             
-            # Filter candidates that actually intersect
+            # Get query bounds for clip_by_rect (much faster than intersection)
+            minx, miny, maxx, maxy = query_polygon_wm.bounds
+            
+            # Process candidates directly with clip_by_rect (no intersects() check needed)
             intersecting_geometries = []
             for idx in candidate_indices:
                 geom = gdf.iloc[idx].geometry
-                if geom.intersects(query_polygon_wm):
-                    # Clip geometry to query area for cleaner rendering
-                    try:
-                        clipped = geom.intersection(query_polygon_wm)
-                        if not clipped.is_empty:
-                            if isinstance(clipped, LineString):
-                                intersecting_geometries.append(clipped)
-                            elif isinstance(clipped, MultiLineString):
-                                for line in clipped.geoms:
-                                    if isinstance(line, LineString):
-                                        intersecting_geometries.append(line)
-                    except:
-                        # If clipping fails, use original geometry
-                        if isinstance(geom, LineString):
-                            intersecting_geometries.append(geom)
-                        elif isinstance(geom, MultiLineString):
-                            for line in geom.geoms:
+                
+                # Use clip_by_rect instead of intersection (much faster)
+                try:
+                    clipped = clip_by_rect(geom, minx, miny, maxx, maxy)
+                    if not clipped.is_empty:
+                        if isinstance(clipped, LineString):
+                            intersecting_geometries.append(clipped)
+                        elif isinstance(clipped, MultiLineString):
+                            for line in clipped.geoms:
                                 if isinstance(line, LineString):
                                     intersecting_geometries.append(line)
+                except:
+                    # If clipping fails, use original geometry
+                    if isinstance(geom, LineString):
+                        intersecting_geometries.append(geom)
+                    elif isinstance(geom, MultiLineString):
+                        for line in geom.geoms:
+                            if isinstance(line, LineString):
+                                intersecting_geometries.append(line)
             
             return intersecting_geometries
         
@@ -864,13 +878,13 @@ def main():
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Default configuration (zoom 1-16)
+    # Default configuration (zoom 1-16) - optimized for performance
     config = TileConfig(
         min_zoom=1,
         max_zoom=16,
         tile_size=512,
-        generate_empty_tiles=True,
-        optimize_png=True
+        generate_empty_tiles=False,  # Skip empty tiles for performance
+        optimize_png=False           # Disable PNG optimization during rendering
     )
     
     # Create generator

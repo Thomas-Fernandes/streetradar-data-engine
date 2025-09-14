@@ -862,7 +862,7 @@ def main():
     
     # Input file
     roads_file = usage_dir / "roads.geojson"
-    mbtiles_output = output_dir / "ja360_coverage.mbtiles"
+    mbtiles_output = output_dir / "ja360.mbtiles"
     
     print(f"📂 Input directory: {usage_dir}")
     print(f"📂 Output directory: {output_dir}")
@@ -907,7 +907,7 @@ def main():
         
         # Convert MBTiles to PMTiles
         print(f"\n🔄 Converting MBTiles to PMTiles...")
-        pmtiles_output = output_dir / "ja360_coverage.pmtiles"
+        pmtiles_output = output_dir / "ja360.pmtiles"
         
         try:
             import subprocess

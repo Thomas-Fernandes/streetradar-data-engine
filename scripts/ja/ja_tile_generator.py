@@ -82,7 +82,7 @@ class TileConfig:
     """Configuration for tile generation"""
     # Zoom levels
     min_zoom: int = 1
-    max_zoom: int = 11
+    max_zoom: int = 16
     
     # Tile properties
     tile_size: int = 512
@@ -130,9 +130,17 @@ class TileConfig:
                 ),
                 # High zooms: thicker lines, full halo
                 TileStyle(
-                    zoom_range=(10, 11),
+                    zoom_range=(10, 13),
                     line_width=2.0,
                     halo_width=0.8,  # Full halo
+                    line_color=(*yellow_rgb, 255),
+                    halo_color=(255, 255, 255, 200)
+                ),
+                # Very high zooms: thickest lines, full halo
+                TileStyle(
+                    zoom_range=(14, 16),
+                    line_width=2.5,
+                    halo_width=1.0,  # Full halo
                     line_color=(*yellow_rgb, 255),
                     halo_color=(255, 255, 255, 200)
                 )
@@ -844,7 +852,7 @@ def main():
     
     print(f"📂 Input directory: {usage_dir}")
     print(f"📂 Output directory: {output_dir}")
-    print(f"🔍 Zoom range: 1-11")
+    print(f"🔍 Zoom range: 1-16")
     print(f"📐 Tile size: 512px")
     
     # Check input file
@@ -856,10 +864,10 @@ def main():
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Default configuration (zoom 1-18)
+    # Default configuration (zoom 1-16)
     config = TileConfig(
         min_zoom=1,
-        max_zoom=11,
+        max_zoom=16,
         tile_size=512,
         generate_empty_tiles=True,
         optimize_png=True

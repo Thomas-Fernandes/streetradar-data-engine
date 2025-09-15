@@ -19,10 +19,6 @@ Output: data/naver/processed/naver_panoramas.parquet (consolidated GeoParquet)
 
 Usage:
     python naver_processor.py [--workers N] [--base-dir PATH]
-
-Author: Data Collection Team
-Date: 2024
-Version: 2.0 - Divide & Conquer Optimization
 """
 
 import os

@@ -100,9 +100,13 @@ def find_naver_pmtiles():
     if custom_path and Path(custom_path).is_file():
         return Path(custom_path)
     
+    root = Path(__file__).resolve().parents[2]
+    # Prioritize new pipeline output location
     search_paths = [
+        root / "data" / "naver" / "tile" / "naver.pmtiles",
         Path.cwd() / "naver.pmtiles",
-        Path(__file__).resolve().parents[2] / "data" / "naver" / "usage" / "tiles" / "naver.pmtiles",
+        # Backward-compat legacy paths
+        root / "data" / "naver" / "usage" / "tiles" / "naver.pmtiles",
         Path(__file__).resolve().parents[1] / "data" / "naver" / "usage" / "tiles" / "naver.pmtiles",
         Path(__file__).resolve().parent / "data" / "naver" / "usage" / "tiles" / "naver.pmtiles",
         Path(__file__).resolve().parent / "naver.pmtiles",
@@ -166,7 +170,7 @@ def main():
     
     try:
         extra_args = {
-            'ContentType': 'application/x-protobuf',
+            'ContentType': 'application/octet-stream',
             'Metadata': {
                 'original-filename': pmtiles_path.name,
                 'file-hash': file_hash,

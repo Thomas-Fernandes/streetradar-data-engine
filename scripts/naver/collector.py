@@ -19,9 +19,6 @@ Output: data/naver/raw/{session}/z/x/y.pbf (tile data)
 
 Usage:
     python naver_scraper.py [--zoom ZOOM_LEVEL]
-
-Author: Data Collection Team
-Date: 2024
 """
 
 import os

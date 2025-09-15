@@ -19,7 +19,7 @@ Input data:
 - coverage_roads.geojson: Complete OSM roads with coverage
 
 Configuration:
-- Zoom levels: 1-18
+- Zoom levels: 1-16
 - Tile size: 512px
 - Style: Variable thickness, white halo, antialiasing
 - Projection: Web Mercator (EPSG:3857)

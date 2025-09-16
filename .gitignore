@@ -9,3 +9,6 @@ proxy.py
 
 #Data
 /data
+
+#Airflow
+/airflow

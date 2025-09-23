@@ -8,7 +8,7 @@ A comprehensive data collection and processing pipeline for street-level imagery
 |----------|:---------------:|:----------:|:------------:|:---------------:|:---------:|
 | **JA360** (Iceland) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Naver** (South Korea) | ✅ | ✅ | ❌ | ✅ | ✅ |
-| **Mapy.cz** (Czech Republic) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Mapy.cz** (Czech Republic) | ⚠️ | ✅ | ❌ | ❌ | ❌ |
 
 ## 🏗️ Architecture Overview
 
@@ -29,10 +29,6 @@ graph LR
     
     H --> I[Public Tile Server]
     F --> J[Archive Storage]
-    
-    style A fill:#e1f5fe
-    style H fill:#c8e6c9
-    style I fill:#fff3e0
 ```
 
 ## 📁 Data Structure

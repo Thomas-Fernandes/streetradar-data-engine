@@ -3,12 +3,26 @@ __pycache__/
 /checkpoints
 current_session.json
 .env
+*.env
 
-#Proxy
+# Proxy
 proxy.py
 
-#Data
+# Data
 /data
 
-#Airflow
+# Airflow
 /airflow
+/airflow/logs/
+/airflow/*.db
+*.log
+simple_auth_manager_passwords.json*
+
+# API Keys and secrets
+*secret*
+*key*.json
+*credentials*
+
+# Temporary files
+*.tmp
+*.temp

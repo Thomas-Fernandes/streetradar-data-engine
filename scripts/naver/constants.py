@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Naver Maps API endpoint configuration
 NAVER_BASE_URL = "https://map.pstatic.net/nvbpc/wmts/panorama"
-NAVER_API_KEY = "c9d936c2-23bf-4a91-82fc-5d03e9b6ad01"
+NAVER_API_KEY = os.getenv("NAVER_API_KEY", "c9d936c2-23bf-4a91-82fc-5d03e9b6ad01") #default api key
 NAVER_ENDPOINT_TEMPLATE = f"{NAVER_BASE_URL}/{NAVER_API_KEY}/getTile/{{x}}/{{y}}/{{z}}/pbf"
 
 # Default zoom level for data collection

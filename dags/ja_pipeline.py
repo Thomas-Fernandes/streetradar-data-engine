@@ -1,7 +1,7 @@
 """
-DAG pour le pipeline JA360
-Séquence: collect_data -> process_data -> match_to_osm -> generate_tiles -> upload_r2
-Déclenchement manuel uniquement, 3 retries par tâche
+DAG for JA360 pipeline
+Sequence: collect_data -> process_data -> match_to_osm -> generate_tiles -> upload_r2
+Manual trigger only, 3 retries per task
 """
 
 from datetime import datetime, timedelta
@@ -9,7 +9,7 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 import os
 
-# Configuration par défaut
+# Default configuration
 default_args = {
     'owner': 'streetradar',
     'depends_on_past': False,
@@ -20,53 +20,53 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-# Définition du DAG
+# DAG definition
 dag = DAG(
     'ja_pipeline',
     default_args=default_args,
-    description='Pipeline de traitement des données JA360',
-    schedule=None,  # Déclenchement manuel uniquement
+    description='JA360 data processing pipeline',
+    schedule=None,  # Manual trigger only
     catchup=False,
     tags=['ja360', 'streetradar', 'pipeline'],
 )
 
-# Chemin vers les scripts
-scripts_path = '/home/nnb/github/streetradar-data-engine/scripts/ja'
+# Path to scripts
+scripts_path = '/opt/streetradar/scripts/ja'
 
-# Tâche 1: Collecte des données
+# Task 1: Data collection
 collect_data = BashOperator(
     task_id='collect_data',
     bash_command=f'cd {scripts_path} && python collect_data.py',
     dag=dag,
 )
 
-# Tâche 2: Traitement des données
+# Task 2: Data processing
 process_data = BashOperator(
     task_id='process_data',
     bash_command=f'cd {scripts_path} && python process_data.py',
     dag=dag,
 )
 
-# Tâche 3: Correspondance avec OSM
+# Task 3: OSM matching
 match_to_osm = BashOperator(
     task_id='match_to_osm',
     bash_command=f'cd {scripts_path} && python match_to_osm.py',
     dag=dag,
 )
 
-# Tâche 4: Génération des tuiles
+# Task 4: Tile generation
 generate_tiles = BashOperator(
     task_id='generate_tiles',
     bash_command=f'cd {scripts_path} && python generate_tiles.py',
     dag=dag,
 )
 
-# Tâche 5: Upload vers R2
+# Task 5: R2 upload
 upload_r2 = BashOperator(
     task_id='upload_r2',
     bash_command=f'cd {scripts_path} && python upload_r2.py',
     dag=dag,
 )
 
-# Définir la séquence des tâches
+# Define task sequence
 collect_data >> process_data >> match_to_osm >> generate_tiles >> upload_r2

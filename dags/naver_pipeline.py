@@ -1,7 +1,7 @@
 """
-DAG pour le pipeline Naver
-Séquence: collect_data -> process_data -> generate_tiles -> upload_r2
-Déclenchement manuel uniquement, 3 retries par tâche
+DAG for Naver pipeline
+Sequence: collect_data -> process_data -> generate_tiles -> upload_r2
+Manual trigger only, 3 retries per task
 """
 
 from datetime import datetime, timedelta
@@ -9,7 +9,7 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 import os
 
-# Configuration par défaut
+# Default configuration
 default_args = {
     'owner': 'streetradar',
     'depends_on_past': False,
@@ -20,46 +20,46 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-# Définition du DAG
+# DAG definition
 dag = DAG(
     'naver_pipeline',
     default_args=default_args,
-    description='Pipeline de traitement des données Naver',
-    schedule=None,  # Déclenchement manuel uniquement
+    description='Naver data processing pipeline',
+    schedule=None,  # Manual trigger only
     catchup=False,
     tags=['naver', 'streetradar', 'pipeline'],
 )
 
-# Chemin vers les scripts
-scripts_path = '/home/nnb/github/streetradar-data-engine/scripts/naver'
+# Path to scripts
+scripts_path = '/opt/streetradar/scripts/naver'
 
-# Tâche 1: Collecte des données
+# Task 1: Data collection
 collect_data = BashOperator(
     task_id='collect_data',
     bash_command=f'cd {scripts_path} && python collect_data.py',
     dag=dag,
 )
 
-# Tâche 2: Traitement des données
+# Task 2: Data processing
 process_data = BashOperator(
     task_id='process_data',
     bash_command=f'cd {scripts_path} && python process_data.py',
     dag=dag,
 )
 
-# Tâche 3: Génération des tuiles
+# Task 3: Tile generation
 generate_tiles = BashOperator(
     task_id='generate_tiles',
     bash_command=f'cd {scripts_path} && python generate_tiles.py',
     dag=dag,
 )
 
-# Tâche 4: Upload vers R2
+# Task 4: R2 upload
 upload_r2 = BashOperator(
     task_id='upload_r2',
     bash_command=f'cd {scripts_path} && python upload_r2.py',
     dag=dag,
 )
 
-# Définir la séquence des tâches
+# Define task sequence
 collect_data >> process_data >> generate_tiles >> upload_r2

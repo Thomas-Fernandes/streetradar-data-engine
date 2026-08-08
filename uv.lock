@@ -3800,7 +3800,7 @@ wheels = [
 [[package]]
 name = "streetradar-data-engine"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -3836,6 +3836,8 @@ airflow = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
@@ -3872,6 +3874,8 @@ provides-extras = ["airflow"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = "==2.3.0" },
+    { name = "pytest", specifier = ">=8.4" },
+    { name = "pytest-asyncio", specifier = ">=1.0" },
     { name = "ruff", specifier = "==0.16.2" },
 ]
 

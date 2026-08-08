@@ -1,0 +1,71 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    lint:
+        name: Lint and format
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Lint
+              run: uv run --only-group dev ruff check .
+
+            - name: Check formatting
+              run: uv run --only-group dev ruff format --check .
+
+            - name: Verify the lockfile matches pyproject.toml
+              run: uv lock --check
+
+    typecheck:
+        name: Typecheck (ratchet)
+        runs-on: ubuntu-latest
+
+        # The codebase is untyped and mypy currently reports a fixed number of
+        # pre-existing errors, recorded in .mypy-baseline. Blocking on zero would
+        # leave CI permanently red and therefore ignored; blocking on "no worse
+        # than before" makes it useful today and lets the number be driven down.
+        #
+        # When the count reaches zero, delete .mypy-baseline and replace this job
+        # with a plain `uv run --only-group dev mypy .`.
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Compare the error count against the baseline
+              run: |
+                  baseline=$(cat .mypy-baseline)
+                  uv run --only-group dev mypy . > mypy-report.txt 2>&1 || true
+                  current=$(grep -cE '^[^ ].*: error:' mypy-report.txt || true)
+
+                  echo "baseline: $baseline"
+                  echo "current:  $current"
+                  echo
+
+                  if [ "$current" -gt "$baseline" ]; then
+                      echo "::error::mypy errors went up: $baseline -> $current"
+                      echo "New type errors were introduced. The report follows."
+                      cat mypy-report.txt
+                      exit 1
+                  fi
+
+                  if [ "$current" -lt "$baseline" ]; then
+                      echo "::notice::mypy errors went down: $baseline -> $current."
+                      echo "Lower the number in .mypy-baseline to $current to lock the gain in."
+                  fi

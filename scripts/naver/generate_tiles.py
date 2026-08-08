@@ -14,44 +14,42 @@ Usage (default paths):
 
 """
 
-import os
-import sys
-import time
+import io
+import logging
 import math
 import sqlite3
-import logging
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union, Generator
+import sys
+import time
+from collections.abc import Generator
 from dataclasses import dataclass
-import io
+from pathlib import Path
 
-import pandas as pd
+import cairo
 import geopandas as gpd
 import numpy as np
-from shapely import wkt
+import pandas as pd
+from PIL import Image
+from pyproj import Transformer
+from shapely import clip_by_rect
 from shapely import wkb as shapely_wkb
 from shapely.geometry import LineString, MultiLineString, box
-from shapely.strtree import STRtree
 from shapely.ops import transform
-from shapely import clip_by_rect
-from pyproj import Transformer
-from PIL import Image
-import cairo
+from shapely.strtree import STRtree
 
 # CRS constants
-WGS84_CRS = 'EPSG:4326'
-WEB_MERCATOR_CRS = 'EPSG:3857'
+WGS84_CRS = "EPSG:4326"
+WEB_MERCATOR_CRS = "EPSG:3857"
 TILE_SIZE = 512
 DEFAULT_BUFFER_DEGREES = 0.002
 
 
 @dataclass
 class TileStyle:
-    zoom_range: Tuple[int, int]
+    zoom_range: tuple[int, int]
     line_width: float
     halo_width: float
-    line_color: Tuple[int, int, int, int]
-    halo_color: Tuple[int, int, int, int]
+    line_color: tuple[int, int, int, int]
+    halo_color: tuple[int, int, int, int]
 
     def applies_to_zoom(self, zoom: int) -> bool:
         return self.zoom_range[0] <= zoom <= self.zoom_range[1]
@@ -63,7 +61,7 @@ class TileConfig:
     max_zoom: int = 16
     tile_size: int = 512
     buffer_degrees: float = DEFAULT_BUFFER_DEGREES
-    styles: List[TileStyle] = None
+    styles: list[TileStyle] = None
     generate_empty_tiles: bool = False
     optimize_png: bool = False
 
@@ -79,7 +77,7 @@ class TileConfig:
                 TileStyle((12, 16), 2.5, 0.0, (*naver_rgb, 255), (255, 255, 255, 0)),
             ]
 
-    def get_style_for_zoom(self, zoom: int) -> Optional[TileStyle]:
+    def get_style_for_zoom(self, zoom: int) -> TileStyle | None:
         for s in self.styles:
             if s.applies_to_zoom(zoom):
                 return s
@@ -91,30 +89,32 @@ class WebMercatorTileCalculator:
     WM_SIZE = WM_ORIGIN_SHIFT * 2
 
     @staticmethod
-    def deg2num(lat_deg: float, lon_deg: float, zoom: int) -> Tuple[int, int]:
+    def deg2num(lat_deg: float, lon_deg: float, zoom: int) -> tuple[int, int]:
         lat_rad = math.radians(lat_deg)
-        n = 2.0 ** zoom
+        n = 2.0**zoom
         x_tile = int((lon_deg + 180.0) / 360.0 * n)
         y_tile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
         return x_tile, y_tile
 
     @staticmethod
-    def num2deg(x_tile: int, y_tile: int, zoom: int) -> Tuple[float, float]:
-        n = 2.0 ** zoom
+    def num2deg(x_tile: int, y_tile: int, zoom: int) -> tuple[float, float]:
+        n = 2.0**zoom
         lon_deg = x_tile / n * 360.0 - 180.0
         lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y_tile / n)))
         lat_deg = math.degrees(lat_rad)
         return lat_deg, lon_deg
 
     @staticmethod
-    def tile_bbox_wgs84(x_tile: int, y_tile: int, zoom: int) -> Tuple[float, float, float, float]:
+    def tile_bbox_wgs84(x_tile: int, y_tile: int, zoom: int) -> tuple[float, float, float, float]:
         lat_nw, lon_nw = WebMercatorTileCalculator.num2deg(x_tile, y_tile, zoom)
         lat_se, lon_se = WebMercatorTileCalculator.num2deg(x_tile + 1, y_tile + 1, zoom)
         return lon_nw, lat_se, lon_se, lat_nw
 
     @staticmethod
-    def tile_bbox_web_mercator(x_tile: int, y_tile: int, zoom: int) -> Tuple[float, float, float, float]:
-        n = 2.0 ** zoom
+    def tile_bbox_web_mercator(
+        x_tile: int, y_tile: int, zoom: int
+    ) -> tuple[float, float, float, float]:
+        n = 2.0**zoom
         unit = WebMercatorTileCalculator.WM_SIZE / n
         minx = -WebMercatorTileCalculator.WM_ORIGIN_SHIFT + x_tile * unit
         maxx = -WebMercatorTileCalculator.WM_ORIGIN_SHIFT + (x_tile + 1) * unit
@@ -123,10 +123,12 @@ class WebMercatorTileCalculator:
         return minx, miny, maxx, maxy
 
     @staticmethod
-    def enumerate_tiles_for_bounds(minx: float, miny: float, maxx: float, maxy: float, zoom: int) -> Generator[Tuple[int, int], None, None]:
+    def enumerate_tiles_for_bounds(
+        minx: float, miny: float, maxx: float, maxy: float, zoom: int
+    ) -> Generator[tuple[int, int], None, None]:
         x_min, y_max = WebMercatorTileCalculator.deg2num(miny, minx, zoom)
         x_max, y_min = WebMercatorTileCalculator.deg2num(maxy, maxx, zoom)
-        n = 2 ** zoom
+        n = 2**zoom
         x_min = max(0, min(x_min, n - 1))
         x_max = max(0, min(x_max, n - 1))
         y_min = max(0, min(y_min, n - 1))
@@ -141,22 +143,31 @@ class GeometryRenderer:
         self.tile_size = tile_size
 
     def create_empty_tile(self) -> Image.Image:
-        return Image.new('RGBA', (self.tile_size, self.tile_size), (0, 0, 0, 0))
+        return Image.new("RGBA", (self.tile_size, self.tile_size), (0, 0, 0, 0))
 
-    def web_mercator_to_pixel(self, x_m: float, y_m: float, bbox_m: Tuple[float, float, float, float]) -> Tuple[float, float]:
+    def web_mercator_to_pixel(
+        self, x_m: float, y_m: float, bbox_m: tuple[float, float, float, float]
+    ) -> tuple[float, float]:
         minx, miny, maxx, maxy = bbox_m
         px_norm = (x_m - minx) / (maxx - minx)
         py_norm = 1.0 - (y_m - miny) / (maxy - miny)
         return px_norm * self.tile_size, py_norm * self.tile_size
 
-    def linestring_to_pixel_coords(self, linestring: LineString, bbox_m: Tuple[float, float, float, float]) -> List[Tuple[float, float]]:
+    def linestring_to_pixel_coords(
+        self, linestring: LineString, bbox_m: tuple[float, float, float, float]
+    ) -> list[tuple[float, float]]:
         coords = []
         for x, y in linestring.coords:
             px, py = self.web_mercator_to_pixel(x, y, bbox_m)
             coords.append((px, py))
         return coords
 
-    def render_linestrings(self, linestrings: List[LineString], bbox_m: Tuple[float, float, float, float], style: TileStyle) -> Image.Image:
+    def render_linestrings(
+        self,
+        linestrings: list[LineString],
+        bbox_m: tuple[float, float, float, float],
+        style: TileStyle,
+    ) -> Image.Image:
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.tile_size, self.tile_size)
         ctx = cairo.Context(surface)
         ctx.set_antialias(cairo.ANTIALIAS_BEST)
@@ -190,7 +201,7 @@ class GeometryRenderer:
 
     def optimize_png(self, img: Image.Image) -> bytes:
         buffer = io.BytesIO()
-        img.save(buffer, format='PNG', optimize=False, compress_level=1)
+        img.save(buffer, format="PNG", optimize=False, compress_level=1)
         return buffer.getvalue()
 
 
@@ -200,18 +211,20 @@ class NaverTileGenerator:
         self.logger = self._setup_logging()
 
         # Store and index geometries in WGS84 for robust spatial querying
-        self.lines_wgs84: List[LineString] = []
-        self.lines_tree_wgs84: Optional[STRtree] = None
+        self.lines_wgs84: list[LineString] = []
+        self.lines_tree_wgs84: STRtree | None = None
 
         self.transformer_to_wm = Transformer.from_crs(WGS84_CRS, WEB_MERCATOR_CRS, always_xy=True)
-        self.transformer_to_wgs84 = Transformer.from_crs(WEB_MERCATOR_CRS, WGS84_CRS, always_xy=True)
+        self.transformer_to_wgs84 = Transformer.from_crs(
+            WEB_MERCATOR_CRS, WGS84_CRS, always_xy=True
+        )
 
         self.renderer = GeometryRenderer(self.config.tile_size)
         self.stats = {
-            'tiles_generated': 0,
-            'tiles_empty': 0,
-            'tiles_with_data': 0,
-            'total_geometries_processed': 0,
+            "tiles_generated": 0,
+            "tiles_empty": 0,
+            "tiles_with_data": 0,
+            "total_geometries_processed": 0,
         }
 
         self.logger.info("🗺️  Naver Raster Tile Generator initialized")
@@ -220,31 +233,31 @@ class NaverTileGenerator:
         self.logger.info(f"🎨 Style layers: {len(self.config.styles)} zoom ranges")
 
     def _setup_logging(self) -> logging.Logger:
-        logger = logging.getLogger('NaverTileGenerator')
+        logger = logging.getLogger("NaverTileGenerator")
         logger.setLevel(logging.INFO)
         logger.handlers.clear()
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
+        formatter = logging.Formatter("%(message)s")
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         return logger
 
-    def load_parquet(self, parquet_file: Union[str, Path]):
+    def load_parquet(self, parquet_file: str | Path):
         self.logger.info("📂 Loading Parquet data (GeoParquet geometry)…")
         start = time.time()
         p = Path(parquet_file)
         if not p.exists():
             raise FileNotFoundError(f"Parquet file not found: {p}")
 
-        lines_wgs84: List[LineString] = []
+        lines_wgs84: list[LineString] = []
 
         # Try GeoPandas GeoParquet path first (preferred)
         try:
             gdf = gpd.read_parquet(p)
-            if 'geometry' in gdf.columns and len(gdf) > 0:
-                if 'geometry_type' in gdf.columns:
-                    mask = gdf['geometry_type'].astype(str).str.contains('LINESTRING', na=False)
+            if "geometry" in gdf.columns and len(gdf) > 0:
+                if "geometry_type" in gdf.columns:
+                    mask = gdf["geometry_type"].astype(str).str.contains("LINESTRING", na=False)
                     gdf = gdf[mask]
                 geoms = gdf.geometry
                 for geom in geoms:
@@ -254,11 +267,11 @@ class NaverTileGenerator:
                         lines_wgs84.extend([ls for ls in geom.geoms if isinstance(ls, LineString)])
         except Exception:
             # Fallback: Pandas + WKB decode
-            df = pd.read_parquet(p, columns=['geometry', 'geometry_type'])
-            df = df[df['geometry'].notna()]
-            if 'geometry_type' in df.columns:
-                df = df[df['geometry_type'].astype(str).str.contains('LINESTRING', na=False)]
-            for blob in df['geometry'].tolist():
+            df = pd.read_parquet(p, columns=["geometry", "geometry_type"])
+            df = df[df["geometry"].notna()]
+            if "geometry_type" in df.columns:
+                df = df[df["geometry_type"].astype(str).str.contains("LINESTRING", na=False)]
+            for blob in df["geometry"].tolist():
                 try:
                     geom = shapely_wkb.loads(blob)
                     if isinstance(geom, LineString):
@@ -281,7 +294,7 @@ class NaverTileGenerator:
         elapsed = time.time() - start
         self.logger.info(f"✅ Spatial index built in {elapsed:.1f}s")
 
-    def get_data_bounds_wgs84(self) -> Tuple[float, float, float, float]:
+    def get_data_bounds_wgs84(self) -> tuple[float, float, float, float]:
         if not self.lines_wgs84:
             return 124.6, 33.0, 131.0, 38.8
         minx = min(geom.bounds[0] for geom in self.lines_wgs84)
@@ -299,9 +312,11 @@ class NaverTileGenerator:
             return None
         return candidate
 
-    def select_geometries_for_tile(self, x_tile: int, y_tile: int, zoom: int) -> List[LineString]:
+    def select_geometries_for_tile(self, x_tile: int, y_tile: int, zoom: int) -> list[LineString]:
         # Build query polygon in WGS84 and use WGS84 index
-        minx_w, miny_w, maxx_w, maxy_w = WebMercatorTileCalculator.tile_bbox_wgs84(x_tile, y_tile, zoom)
+        minx_w, miny_w, maxx_w, maxy_w = WebMercatorTileCalculator.tile_bbox_wgs84(
+            x_tile, y_tile, zoom
+        )
         buffer = self.config.buffer_degrees
         query_poly_wgs = box(minx_w - buffer, miny_w - buffer, maxx_w + buffer, maxy_w + buffer)
 
@@ -311,7 +326,7 @@ class NaverTileGenerator:
         try:
             candidates = self.lines_tree_wgs84.query(query_poly_wgs)
             minx, miny, maxx, maxy = query_poly_wgs.bounds
-            result_wm: List[LineString] = []
+            result_wm: list[LineString] = []
 
             def to_wm(x, y, z=None):
                 return self.transformer_to_wm.transform(x, y)
@@ -357,7 +372,7 @@ class NaverTileGenerator:
         except Exception:
             return []
 
-    def generate_tile(self, x_tile: int, y_tile: int, zoom: int) -> Optional[bytes]:
+    def generate_tile(self, x_tile: int, y_tile: int, zoom: int) -> bytes | None:
         style = self.config.get_style_for_zoom(zoom)
         if style is None:
             return None
@@ -366,28 +381,34 @@ class NaverTileGenerator:
         if not has_data and not self.config.generate_empty_tiles:
             return None
         bbox_m = WebMercatorTileCalculator.tile_bbox_web_mercator(x_tile, y_tile, zoom)
-        img = self.renderer.render_linestrings(geoms, bbox_m, style) if has_data else self.renderer.create_empty_tile()
+        img = (
+            self.renderer.render_linestrings(geoms, bbox_m, style)
+            if has_data
+            else self.renderer.create_empty_tile()
+        )
         if has_data:
-            self.stats['tiles_with_data'] += 1
-            self.stats['total_geometries_processed'] += len(geoms)
+            self.stats["tiles_with_data"] += 1
+            self.stats["total_geometries_processed"] += len(geoms)
         else:
-            self.stats['tiles_empty'] += 1
+            self.stats["tiles_empty"] += 1
         buffer = io.BytesIO()
-        img.save(buffer, format='PNG')
-        self.stats['tiles_generated'] += 1
+        img.save(buffer, format="PNG")
+        self.stats["tiles_generated"] += 1
         return buffer.getvalue()
 
-    def enumerate_all_tiles(self) -> Generator[Tuple[int, int, int], None, None]:
+    def enumerate_all_tiles(self) -> Generator[tuple[int, int, int], None, None]:
         minx, miny, maxx, maxy = self.get_data_bounds_wgs84()
         self.logger.info(f"📊 Data bounds: ({miny:.4f}, {minx:.4f}) → ({maxy:.4f}, {maxx:.4f})")
         for zoom in range(self.config.min_zoom, self.config.max_zoom + 1):
             zoom_tiles = 0
-            for x_tile, y_tile in WebMercatorTileCalculator.enumerate_tiles_for_bounds(minx, miny, maxx, maxy, zoom):
+            for x_tile, y_tile in WebMercatorTileCalculator.enumerate_tiles_for_bounds(
+                minx, miny, maxx, maxy, zoom
+            ):
                 yield x_tile, y_tile, zoom
                 zoom_tiles += 1
             self.logger.info(f"📏 Zoom {zoom}: {zoom_tiles:,} tiles")
 
-    def generate_mbtiles(self, output_file: Union[str, Path]) -> Dict:
+    def generate_mbtiles(self, output_file: str | Path) -> dict:
         output_path = Path(output_file)
         self.logger.info(f"🗃️  Generating MBTiles to {output_path}")
         start_time = time.time()
@@ -395,52 +416,69 @@ class NaverTileGenerator:
             output_path.unlink()
         conn = sqlite3.connect(str(output_path))
         cursor = conn.cursor()
-        cursor.execute('CREATE TABLE metadata (name text, value text);')
-        cursor.execute('CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, tile_data blob);')
-        cursor.execute('CREATE UNIQUE INDEX tile_index on tiles (zoom_level, tile_column, tile_row);')
+        cursor.execute("CREATE TABLE metadata (name text, value text);")
+        cursor.execute(
+            "CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, tile_data blob);"
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX tile_index on tiles (zoom_level, tile_column, tile_row);"
+        )
 
         bounds = self.get_data_bounds_wgs84()
         metadata = {
-            'name': 'Naver Coverage',
-            'type': 'overlay',
-            'version': '1.0',
-            'description': 'Naver street coverage raster tiles',
-            'format': 'png',
-            'bounds': f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}",
-            'minzoom': str(self.config.min_zoom),
-            'maxzoom': str(self.config.max_zoom),
-            'center': f"{(bounds[0]+bounds[2])/2},{(bounds[1]+bounds[3])/2},{self.config.max_zoom}",
+            "name": "Naver Coverage",
+            "type": "overlay",
+            "version": "1.0",
+            "description": "Naver street coverage raster tiles",
+            "format": "png",
+            "bounds": f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}",
+            "minzoom": str(self.config.min_zoom),
+            "maxzoom": str(self.config.max_zoom),
+            "center": f"{(bounds[0] + bounds[2]) / 2},{(bounds[1] + bounds[3]) / 2},{self.config.max_zoom}",
         }
         for k, v in metadata.items():
-            cursor.execute('INSERT INTO metadata (name, value) VALUES (?, ?)', (k, v))
+            cursor.execute("INSERT INTO metadata (name, value) VALUES (?, ?)", (k, v))
 
-        self.stats = {'tiles_generated': 0, 'tiles_empty': 0, 'tiles_with_data': 0, 'total_geometries_processed': 0}
+        self.stats = {
+            "tiles_generated": 0,
+            "tiles_empty": 0,
+            "tiles_with_data": 0,
+            "total_geometries_processed": 0,
+        }
         batch_size = 1000
         tiles_processed = 0
         batch_data = []
         for x_tile, y_tile, zoom in self.enumerate_all_tiles():
             png_bytes = self.generate_tile(x_tile, y_tile, zoom)
             if png_bytes is not None:
-                y_tms = (2 ** zoom - 1) - y_tile
+                y_tms = (2**zoom - 1) - y_tile
                 batch_data.append((zoom, x_tile, y_tms, png_bytes))
             tiles_processed += 1
             if len(batch_data) >= batch_size:
-                cursor.executemany('INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)', batch_data)
+                cursor.executemany(
+                    "INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
+                    batch_data,
+                )
                 conn.commit()
                 batch_data = []
         if batch_data:
-            cursor.executemany('INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)', batch_data)
+            cursor.executemany(
+                "INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
+                batch_data,
+            )
             conn.commit()
         conn.close()
         elapsed = time.time() - start_time
         file_size_mb = output_path.stat().st_size / (1024 * 1024)
-        self.logger.info(f"✅ MBTiles generation completed in {elapsed:.1f}s, size {file_size_mb:.1f} MB")
-        self.stats['generation_time_seconds'] = elapsed
-        self.stats['tiles_per_second'] = tiles_processed / elapsed if elapsed > 0 else 0
-        self.stats['file_size_mb'] = file_size_mb
+        self.logger.info(
+            f"✅ MBTiles generation completed in {elapsed:.1f}s, size {file_size_mb:.1f} MB"
+        )
+        self.stats["generation_time_seconds"] = elapsed
+        self.stats["tiles_per_second"] = tiles_processed / elapsed if elapsed > 0 else 0
+        self.stats["file_size_mb"] = file_size_mb
         return self.stats
 
-    def process_mbtiles(self, parquet_file: Union[str, Path], output_file: Union[str, Path]) -> Dict:
+    def process_mbtiles(self, parquet_file: str | Path, output_file: str | Path) -> dict:
         total_start = time.time()
         try:
             self.load_parquet(parquet_file)
@@ -484,8 +522,8 @@ def main():
 
     print(f"📂 Input parquet: {parquet_file}")
     print(f"📂 Output directory: {output_dir}")
-    print(f"🔍 Zoom range: 1-16")
-    print(f"📐 Tile size: 512px")
+    print("🔍 Zoom range: 1-16")
+    print("📐 Tile size: 512px")
 
     if not parquet_file.exists():
         print(f"\n❌ Parquet file not found: {parquet_file}")
@@ -494,30 +532,39 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = TileConfig(min_zoom=1, max_zoom=16, tile_size=512, generate_empty_tiles=False, optimize_png=False)
+    config = TileConfig(
+        min_zoom=1, max_zoom=16, tile_size=512, generate_empty_tiles=False, optimize_png=False
+    )
     generator = NaverTileGenerator(config)
 
     try:
-        print(f"\n🗃️  Generating MBTiles…")
+        print("\n🗃️  Generating MBTiles…")
         stats = generator.process_mbtiles(parquet_file, mbtiles_output)
         print(f"\n✅ MBTiles generation completed: {mbtiles_output}")
         print(f"📊 File size: {stats['file_size_mb']:.1f} MB")
         print(f"🚀 Performance: {stats['tiles_per_second']:.1f} tiles/second")
 
         # Convert to PMTiles
-        print(f"\n🔄 Converting MBTiles to PMTiles…")
+        print("\n🔄 Converting MBTiles to PMTiles…")
         try:
-            import subprocess, shutil
-            pmtiles_cmd = shutil.which('pmtiles')
+            import shutil
+            import subprocess
+
+            pmtiles_cmd = shutil.which("pmtiles")
             if not pmtiles_cmd:
                 print("⚠️  pmtiles not found. Install with: npm install -g pmtiles")
                 print(f"💡 Then run: pmtiles convert {mbtiles_output} {pmtiles_output}")
                 return
-            subprocess.run(['pmtiles', 'convert', str(mbtiles_output), str(pmtiles_output)], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["pmtiles", "convert", str(mbtiles_output), str(pmtiles_output)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             pmtiles_size_mb = pmtiles_output.stat().st_size / (1024 * 1024)
             print(f"✅ PMTiles conversion completed: {pmtiles_output}")
             print(f"📊 PMTiles size: {pmtiles_size_mb:.1f} MB")
-            print(f"\n🧹 Cleaning up MBTiles…")
+            print("\n🧹 Cleaning up MBTiles…")
             mbtiles_output.unlink(missing_ok=True)
         except subprocess.CalledProcessError as e:
             print(f"❌ PMTiles conversion failed: {e}")
@@ -531,6 +578,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

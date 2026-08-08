@@ -55,22 +55,13 @@ jobs:
               with:
                   enable-cache: true
 
-            # pycairo and pyexiv2 have no wheels and build from source, so
-            # `uv run` cannot resolve the project without their headers. The
-            # tests do not touch either, but uv installs the full dependency set
-            # before running anything.
+            # Core dependencies only — no `--extra providers`. The tests cover
+            # streetradar/, which needs aiohttp, boto3 and dotenv and nothing
+            # that builds from source, so this step needs no system packages.
             #
-            # Worth revisiting: moving the geospatial stack into an optional
-            # extra would leave streetradar/ with aiohttp, boto3 and dotenv, and
-            # this step would need no system packages at all.
-            - name: Install build headers for the source-only packages
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y --no-install-recommends libcairo2-dev libexiv2-dev pkg-config
-
-            # Covers the shared package only. The provider scripts stay untested
-            # until they are ported onto it — testing code that is about to be
-            # rewritten buys nothing.
+            # The provider scripts stay untested until they are ported onto the
+            # shared package; testing code that is about to be rewritten buys
+            # nothing.
             - name: Run tests
               run: uv run pytest -q
 

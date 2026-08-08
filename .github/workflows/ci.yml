@@ -4,6 +4,11 @@ on:
     push:
         branches: [main]
     pull_request:
+        # ready_for_review is not one of the default activity types. It has to be
+        # listed explicitly, otherwise a draft PR skipped by the guards below would
+        # never run CI at all — marking it ready would trigger nothing and it could
+        # be merged without a single check having run.
+        types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,6 +18,12 @@ jobs:
     lint:
         name: Lint and format
         runs-on: ubuntu-latest
+
+        # Draft pull requests still fire the `pull_request` event — the draft flag
+        # filters nothing by itself. This condition is what actually skips them.
+        # The event_name check keeps pushes to main running, where there is no
+        # pull_request object to read.
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
 
         steps:
             - uses: actions/checkout@v4
@@ -33,6 +44,9 @@ jobs:
     typecheck:
         name: Typecheck (ratchet)
         runs-on: ubuntu-latest
+
+        # Same draft guard as the lint job above.
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
 
         # The codebase is untyped and mypy currently reports a fixed number of
         # pre-existing errors, recorded in .mypy-baseline. Blocking on zero would

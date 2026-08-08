@@ -25,11 +25,11 @@ WORKDIR /app
 # Dependencies resolve from the lockfile alone, so this layer is only rebuilt
 # when pyproject.toml or uv.lock actually change.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev --extra providers
 
 COPY streetradar/ ./streetradar/
 COPY scripts/ ./scripts/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra providers
 
 # -------------------------------------------------------------- runtime ----
 FROM python:3.12-slim-bookworm AS runtime

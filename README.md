@@ -53,7 +53,45 @@ data/
 
 ### Code Structure
 
-- `dags/` - Airflow DAG definitions
-- `scripts/` - Individual processing scripts for each provider
-- `streetlevel/` - Core library for street-level data handling
-- `airflow/` - Airflow configuration and logs
+- `streetradar/` - Shared package: HTTP layer, R2 storage, config, logging
+- `scripts/` - Provider-specific collection and processing
+- `tests/` - Tests for the shared package
+
+### Setup
+
+```bash
+uv sync --extra providers   # everything the provider scripts need
+uv sync                     # shared package only, enough to run the tests
+```
+
+`--extra providers` pulls the geospatial stack. Two of its packages, pycairo
+and pyexiv2, build from source and need `libcairo2-dev` and `libexiv2-dev`.
+
+### Running the pipeline
+
+Each stage is a one-shot container; see `docker-compose.yml`.
+
+```bash
+docker compose run --rm ja-collect
+docker compose run --rm ja-tiles && docker compose run --rm ja-upload
+```
+
+Scheduling is host cron rather than a scheduler in the image. Airflow was
+removed: three monthly pipelines did not justify a scheduler, a webserver and
+a metadata database running permanently, and its dependency tree carried the
+only critical security advisories in the project.
+
+### Rate limits and proxies
+
+Every outbound request from a ported collector goes through
+`streetradar.http`, configured per provider with `SCRAPE_<PROVIDER>_*`:
+
+```bash
+SCRAPE_NAVER_MAX_CONCURRENCY=32
+SCRAPE_NAVER_REQUESTS_PER_HOUR=20000
+SCRAPE_NAVER_PROXIES=http://user:pass@host:port,http://...
+```
+
+Naver routes through it fully. Já only partially — `streetlevel` issues its own
+requests, so it gets the budget and concurrency ceiling but not retries,
+backoff or proxy rotation.

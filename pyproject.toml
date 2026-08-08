@@ -11,31 +11,41 @@ version = "0.1.0"
 description = "Collection and processing pipeline for street-level imagery coverage"
 requires-python = ">=3.12"
 
-# Pinned to the versions the pipeline was last known to run on, read from the
-# working virtualenv rather than resolved fresh. GeoPandas, Shapely and DuckDB
-# all break their APIs across majors, so an unpinned requirements.txt meant the
-# pipeline could not be rebuilt reliably.
+# Core: what `streetradar/` itself imports, and nothing else. Keeping it this
+# small means the package and its tests install without the geospatial stack —
+# pycairo and pyexiv2 in particular ship no wheels and need system headers, so
+# CI had to apt-get them just to run tests that touch neither.
 dependencies = [
-    "aiofiles==24.1.0",
-    "aiohttp==3.12.14",
-    "bd09convertor==0.0.3",
+    "aiohttp==3.14.3",
     "boto3==1.40.0",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+# Everything the provider scripts under scripts/ need. Install with
+# `uv sync --extra providers`; the container does this, CI does not.
+#
+# Versions are pinned because GeoPandas, Shapely and DuckDB break their APIs
+# across majors, and an unpinned requirements.txt is what made the pipeline
+# unreproducible in the first place.
+providers = [
+    "aiofiles==24.1.0",
+    "bd09convertor==0.0.3",
     "CoordinatesConverter==0.1.5",
     "duckdb==1.3.2",
-    "geopandas==1.1.1",
+    "geopandas==1.1.2",
     "mapbox-vector-tile==2.2.0",
     "numpy==2.3.1",
     "osmium==4.1.1",
     "pandas==2.3.1",
-    "pillow==11.3.0",
+    "pillow==12.3.0",
     "psutil==7.0.0",
-    "pyarrow==20.0.0",
+    "pyarrow==23.0.1",
     "pycairo==1.28.0",
     "pyexiv2==2.15.4",
     "pyfrpc==0.2.13",
     "pyproj==3.7.1",
-    "python-dotenv==1.1.1",
-    "requests==2.32.4",
+    "requests==2.33.0",
     "scipy==1.16.0",
     "shapely==2.1.1",
     "streetlevel==0.12.4",
@@ -45,11 +55,6 @@ dependencies = [
     "torch==2.13.0",
     "uvloop==0.21.0",
 ]
-
-[project.optional-dependencies]
-# Airflow is only needed to run dags/. It is deliberately not a core dependency:
-# the scripts are plain Python and must stay runnable without a scheduler.
-airflow = ["apache-airflow==3.0.6"]
 
 [dependency-groups]
 # ruff and mypy are pinned exactly: the mypy error count in .mypy-baseline is
@@ -79,7 +84,7 @@ torch = { index = "pytorch-cpu" }
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["venv", "airflow", "data"]
+extend-exclude = ["venv", "data"]
 
 [tool.ruff.lint]
 select = [
@@ -96,21 +101,10 @@ ignore = [
     "B008",  # function call in default argument — common and intentional here
 ]
 
-[tool.ruff.lint.isort]
-# Stated explicitly on purpose. A local AIRFLOW_HOME directory named `airflow`
-# makes isort infer the package as first-party, so import order came out
-# differently on a developer machine than on a clean CI checkout. Pinning the
-# classification keeps the result independent of what happens to be on disk.
-known-third-party = ["airflow"]
-
-[tool.ruff.lint.per-file-ignores]
-# Airflow DAGs assign a module-level `dag` object that reads as unused.
-"dags/*.py" = ["F401"]
-
 [tool.mypy]
 python_version = "3.12"
-files = ["streetradar", "scripts", "dags", "tests"]
-exclude = "(venv|airflow|data)/"
+files = ["streetradar", "scripts", "tests"]
+exclude = "(venv|data)/"
 
 # Every provider ships its own collect_data.py / process_data.py / upload_r2.py,
 # so module names collide three ways. These two settings make mypy key on the

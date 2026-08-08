@@ -43,6 +43,7 @@ __all__ = [
     "ProxyPool",
     "RateBudget",
     "HttpError",
+    "HttpStatusError",
     "RateLimited",
     "RetriesExhausted",
 ]
@@ -70,6 +71,15 @@ class RateLimited(HttpError):
         super().__init__(f"Rate limited on {url} (retry-after={retry_after})")
         self.url = url
         self.retry_after = retry_after
+
+
+class HttpStatusError(HttpError):
+    """A definitive non-retryable HTTP status, such as 404 or 403."""
+
+    def __init__(self, url: str, status: int) -> None:
+        super().__init__(f"HTTP {status} for {url}")
+        self.url = url
+        self.status = status
 
 
 class RetriesExhausted(HttpError):
@@ -241,9 +251,19 @@ class HttpClient:
             await self._session.close()
             self._session = None
 
-    async def get_bytes(self, url: str, **kwargs: Any) -> bytes:
-        """GET a URL and return the body, retrying per policy."""
-        return await self._request("GET", url, **kwargs)
+    async def get_bytes(self, url: str, *, missing_ok: bool = False, **kwargs: Any) -> bytes | None:
+        """GET a URL and return the body, retrying per policy.
+
+        With `missing_ok`, a 404 returns None instead of raising. Tile grids are
+        sparse — most coordinates in a bounding box hold no imagery — so for a
+        collector "not there" is an ordinary answer, not a failure.
+        """
+        try:
+            return await self._request("GET", url, **kwargs)
+        except HttpStatusError as exc:
+            if missing_ok and exc.status == 404:
+                return None
+            raise
 
     async def get_json(self, url: str, **kwargs: Any) -> Any:
         """GET a URL and parse the body as JSON."""
@@ -277,7 +297,14 @@ class HttpClient:
                             await self._sleep_before_retry(attempt, retry_after)
                             continue
 
-                        response.raise_for_status()
+                        # Anything else outside 2xx is the server telling us
+                        # something definitive: 404 means the tile is not there,
+                        # 403 means we are blocked. Retrying burns the budget and
+                        # benching a proxy over it throws away a working one, so
+                        # these fail immediately and let the caller decide.
+                        if response.status >= 400:
+                            raise HttpStatusError(url, response.status)
+
                         return await response.read()
 
             except (TimeoutError, aiohttp.ClientError) as exc:

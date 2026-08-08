@@ -34,7 +34,8 @@ from datetime import datetime
 from pathlib import Path
 
 import aiofiles
-import aiohttp
+
+from streetradar.http import HttpClient, HttpError, HttpPolicy
 
 # Add the current directory to the path to import constants
 sys.path.insert(0, os.path.dirname(__file__))
@@ -64,7 +65,6 @@ from constants import (
     PROGRESS_REPORT_INTERVAL,
     RAW_DATA_DIR,
     REQUEST_TIMEOUT,
-    RETRY_DELAY,
     SESSION_TRACKER_FILE,
     get_log_file_path,
     get_session_dir,
@@ -340,17 +340,19 @@ class NaverTileScraper:
         self.zoom_level = zoom_level
         self.logger = self._setup_logging()
 
-        # Statistics tracking
-        self.stats = {
+        # Counters and timestamps used to share one dict, which forced every
+        # entry to `int | None` and made each `+= 1` a type error. Splitting
+        # them keeps the counters plainly integers.
+        self.stats: dict[str, int] = {
             "total_tiles": 0,
             "downloaded_tiles": 0,
             "failed_tiles": 0,
             "skipped_tiles": 0,
-            "start_time": None,
-            "end_time": None,
         }
+        self.started_at: float = 0.0
+        self.ended_at: float = 0.0
 
-        self.failed_requests = []
+        self.failed_requests: list[dict[str, str]] = []
 
     def _setup_logging(self) -> logging.Logger:
         """
@@ -384,16 +386,20 @@ class NaverTileScraper:
 
         return logger
 
-    async def download_tile(self, session: aiohttp.ClientSession, tile: TileCoordinate) -> bool:
+    async def download_tile(self, http: HttpClient, tile: TileCoordinate) -> bool:
         """
         Download a single tile from Naver Maps API.
 
+        Retries, backoff, proxy rotation and the request budget all live in the
+        shared HTTP layer, so what is left here is the tile-specific part: where
+        the file goes and what an absent tile means.
+
         Args:
-            session: aiohttp session for making requests
+            http: shared client carrying this provider's rate-limit policy
             tile: Tile coordinate to download
 
         Returns:
-            True if download was successful, False otherwise
+            True if the tile was stored or is legitimately absent, False on error
         """
         url = NAVER_ENDPOINT_TEMPLATE.format(x=tile.x, y=tile.y, z=tile.z)
         file_path = get_tile_file_path(int(self.session_dir.name), tile.z, tile.x, tile.y)
@@ -403,56 +409,34 @@ class NaverTileScraper:
             self.stats["skipped_tiles"] += 1
             return True
 
-        # Create directory structure
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Attempt download with retries
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                # Use explicit headers to avoid brotli compression issues
-                request_headers = {
-                    "User-Agent": DEFAULT_HEADERS["User-Agent"],
-                    "Accept": "application/x-protobuf,*/*",
-                    "Accept-Encoding": "gzip, deflate",  # No brotli
+        try:
+            # Most coordinates in the bounding box hold no imagery, so a 404 is
+            # the common answer rather than a failure.
+            payload = await http.get_bytes(url, missing_ok=True)
+        except HttpError as exc:
+            self.logger.warning(f"Giving up on tile {tile}: {exc}")
+            self.stats["failed_tiles"] += 1
+            self.failed_requests.append(
+                {
+                    "tile": str(tile),
+                    "url": url,
+                    "error": str(exc),
+                    "timestamp": datetime.now().isoformat(),
                 }
+            )
+            return False
 
-                async with session.get(
-                    url, headers=request_headers, timeout=REQUEST_TIMEOUT
-                ) as response:
-                    if response.status == 200:
-                        # Save tile data
-                        async with aiofiles.open(file_path, "wb") as f:
-                            await f.write(await response.read())
+        if payload is None:
+            self.logger.debug(f"Tile {tile} not found (404)")
+            self.stats["skipped_tiles"] += 1
+            return True
 
-                        self.stats["downloaded_tiles"] += 1
-                        return True
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(payload)
 
-                    elif response.status == 404:
-                        # Tile doesn't exist (empty area)
-                        self.logger.debug(f"Tile {tile} not found (404)")
-                        self.stats["skipped_tiles"] += 1
-                        return True
-
-                    else:
-                        self.logger.warning(f"HTTP {response.status} for tile {tile}")
-
-            except TimeoutError:
-                self.logger.warning(f"Timeout for tile {tile} (attempt {attempt + 1})")
-
-            except Exception as e:
-                self.logger.error(f"Error downloading tile {tile}: {e}")
-
-            # Wait before retry
-            if attempt < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY * (2**attempt))
-
-        # All attempts failed
-        self.stats["failed_tiles"] += 1
-        self.failed_requests.append(
-            {"tile": str(tile), "url": url, "timestamp": datetime.now().isoformat()}
-        )
-
-        return False
+        self.stats["downloaded_tiles"] += 1
+        return True
 
     async def download_tiles(self, tiles: set[TileCoordinate]) -> None:
         """
@@ -462,35 +446,37 @@ class NaverTileScraper:
             tiles: Set of tile coordinates to download
         """
         self.stats["total_tiles"] = len(tiles)
-        self.stats["start_time"] = time.time()
+        self.started_at = time.time()
 
         self.logger.info(
             f"{EMOJI_START} Starting download of {len(tiles):,} tiles at zoom {self.zoom_level}"
         )
 
-        # Create connector with connection pooling
-        connector = aiohttp.TCPConnector(
-            limit=MAX_CONCURRENT_REQUESTS,
-            limit_per_host=MAX_CONCURRENT_REQUESTS,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=60,
+        # Concurrency, timeout, retries and the request budget are all policy
+        # now. Defaults come from the constants this script has always used;
+        # SCRAPE_NAVER_* overrides them without a code change, which is how you
+        # back off in production without redeploying.
+        #
+        # A word on the default: MAX_CONCURRENT_REQUESTS is 1000 against an
+        # undocumented endpoint with no request budget. That is a lot of load
+        # from one IP. Set SCRAPE_NAVER_MAX_CONCURRENCY and
+        # SCRAPE_NAVER_REQUESTS_PER_HOUR before running this anywhere it matters.
+        session_headers = {k: v for k, v in DEFAULT_HEADERS.items() if k != "User-Agent"}
+        policy = HttpPolicy.from_env(
+            "SCRAPE_NAVER",
+            max_concurrency=MAX_CONCURRENT_REQUESTS,
+            max_retries=MAX_RETRIES,
+            timeout=float(REQUEST_TIMEOUT),
+            user_agent=DEFAULT_HEADERS["User-Agent"],
+            headers=session_headers,
         )
 
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-
-        # Custom headers without brotli compression to avoid decode issues
-        session_headers = DEFAULT_HEADERS.copy()
-
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=timeout, headers=session_headers
-        ) as session:
-            # Create semaphore for concurrent requests
-            semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-
-            async def download_with_semaphore(tile: TileCoordinate) -> bool:
-                async with semaphore:
-                    return await self.download_tile(session, tile)
+        async with HttpClient(policy) as http:
+            self.logger.info(
+                f"HTTP policy: concurrency={policy.max_concurrency}, "
+                f"budget={policy.requests_per_hour or 'unlimited'}/h, "
+                f"proxies={len(policy.proxies)}"
+            )
 
             # Process tiles in batches for progress reporting
             tiles_list = list(tiles)
@@ -499,19 +485,24 @@ class NaverTileScraper:
             for i in range(0, len(tiles_list), PROGRESS_REPORT_INTERVAL):
                 batch = tiles_list[i : i + PROGRESS_REPORT_INTERVAL]
 
-                # Download batch
-                tasks = [download_with_semaphore(tile) for tile in batch]
-                # FIXME: return_exceptions=True turns each failed download into a
-                # returned exception object, and nothing ever inspects them. A whole
-                # batch can fail while the run still reports progress and success.
-                # Surface these once the shared HTTP layer lands.
-                _results = await asyncio.gather(*tasks, return_exceptions=True)
+                tasks = [self.download_tile(http, tile) for tile in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # These used to be collected and dropped, so a batch could fail
+                # outright while the run reported progress and exited 0.
+                crashed = [r for r in results if isinstance(r, BaseException)]
+                if crashed:
+                    self.stats["failed_tiles"] += len(crashed)
+                    self.logger.error(
+                        f"{len(crashed)}/{len(batch)} tiles raised in this batch; "
+                        f"first: {crashed[0]!r}"
+                    )
 
                 completed += len(batch)
 
                 # Log progress
                 progress_percent = (completed / len(tiles_list)) * 100
-                elapsed = time.time() - self.stats["start_time"]
+                elapsed = time.time() - self.started_at
                 rate = completed / elapsed if elapsed > 0 else 0
 
                 self.logger.info(
@@ -522,7 +513,7 @@ class NaverTileScraper:
                     f"Failed: {self.stats['failed_tiles']:,}"
                 )
 
-        self.stats["end_time"] = time.time()
+        self.ended_at = time.time()
 
         # Save failed requests log
         if self.failed_requests:
@@ -532,7 +523,7 @@ class NaverTileScraper:
 
     def print_final_stats(self) -> None:
         """Print final download statistics."""
-        elapsed = self.stats["end_time"] - self.stats["start_time"]
+        elapsed = self.ended_at - self.started_at
         rate = self.stats["total_tiles"] / elapsed if elapsed > 0 else 0
 
         self.logger.info(f"\n{EMOJI_SUCCESS} Download completed!")

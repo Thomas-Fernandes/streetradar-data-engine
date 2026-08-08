@@ -7,9 +7,8 @@ Manual trigger only, 3 retries per task
 import os
 from datetime import datetime, timedelta
 
-from airflow.operators.bash import BashOperator
-
 from airflow import DAG
+from airflow.operators.bash import BashOperator
 
 # Default configuration
 default_args = {

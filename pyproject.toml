@@ -58,6 +58,13 @@ ignore = [
     "B008",  # function call in default argument — common and intentional here
 ]
 
+[tool.ruff.lint.isort]
+# Stated explicitly on purpose. A local AIRFLOW_HOME directory named `airflow`
+# makes isort infer the package as first-party, so import order came out
+# differently on a developer machine than on a clean CI checkout. Pinning the
+# classification keeps the result independent of what happens to be on disk.
+known-third-party = ["airflow"]
+
 [tool.ruff.lint.per-file-ignores]
 # Airflow DAGs assign a module-level `dag` object that reads as unused.
 "dags/*.py" = ["F401"]

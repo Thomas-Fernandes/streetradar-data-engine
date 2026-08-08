@@ -1,0 +1,75 @@
+# The pipeline on a VPS.
+#
+# Nothing runs on a schedule from inside a container here. Each stage is a
+# one-shot `docker compose run`, driven by host cron. That keeps the scheduler
+# out of the image, makes a stage trivially re-runnable by hand, and means a
+# hung collection is one `docker stop` away rather than a supervisor problem.
+#
+#   docker compose run --rm ja-collect
+#   docker compose run --rm ja-tiles && docker compose run --rm ja-upload
+#
+# Suggested crontab on the host, monthly and staggered:
+#   0 2 1 * *  cd /srv/streetradar && docker compose run --rm ja-collect    >> /var/log/sr-ja.log 2>&1
+#   0 8 1 * *  cd /srv/streetradar && docker compose run --rm naver-collect >> /var/log/sr-naver.log 2>&1
+
+x-engine: &engine
+  image: ghcr.io/thomas-fernandes/streetradar-data-engine:latest
+  build: .
+  env_file:
+    - .env
+  volumes:
+    - pipeline-data:/data
+  # A collection that dies mid-run resumes from its checkpoint, so restarting
+  # is safe. It is not automatic: a provider that changed its API will fail
+  # identically every time, and a restart loop only hides that.
+  restart: "no"
+
+services:
+  # --- Já 360 (Iceland) ---------------------------------------------------
+  ja-collect:
+    <<: *engine
+    command: ["python", "scripts/ja/collect_data.py"]
+
+  ja-process:
+    <<: *engine
+    command: ["python", "scripts/ja/process_data.py"]
+
+  ja-match:
+    <<: *engine
+    command: ["python", "scripts/ja/match_to_osm.py"]
+
+  ja-tiles:
+    <<: *engine
+    command: ["python", "scripts/ja/generate_tiles.py"]
+
+  ja-upload:
+    <<: *engine
+    command: ["python", "scripts/ja/upload_r2.py"]
+
+  # --- Naver (South Korea) ------------------------------------------------
+  naver-collect:
+    <<: *engine
+    command: ["python", "scripts/naver/collect_data.py"]
+
+  naver-process:
+    <<: *engine
+    command: ["python", "scripts/naver/process_data.py"]
+
+  naver-tiles:
+    <<: *engine
+    command: ["python", "scripts/naver/generate_tiles.py"]
+
+  naver-upload:
+    <<: *engine
+    command: ["python", "scripts/naver/upload_r2.py"]
+
+  # Interactive shell against the same image and volume, for inspecting what a
+  # stage left behind.
+  shell:
+    <<: *engine
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  pipeline-data:

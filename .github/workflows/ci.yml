@@ -41,6 +41,39 @@ jobs:
             - name: Verify the lockfile matches pyproject.toml
               run: uv lock --check
 
+    test:
+        name: Tests
+        runs-on: ubuntu-latest
+
+        # Same draft guard as the other jobs.
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            # pycairo and pyexiv2 have no wheels and build from source, so
+            # `uv run` cannot resolve the project without their headers. The
+            # tests do not touch either, but uv installs the full dependency set
+            # before running anything.
+            #
+            # Worth revisiting: moving the geospatial stack into an optional
+            # extra would leave streetradar/ with aiohttp, boto3 and dotenv, and
+            # this step would need no system packages at all.
+            - name: Install build headers for the source-only packages
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends libcairo2-dev libexiv2-dev pkg-config
+
+            # Covers the shared package only. The provider scripts stay untested
+            # until they are ported onto it — testing code that is about to be
+            # rewritten buys nothing.
+            - name: Run tests
+              run: uv run pytest -q
+
     typecheck:
         name: Typecheck (ratchet)
         runs-on: ubuntu-latest

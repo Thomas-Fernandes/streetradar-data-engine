@@ -12,7 +12,9 @@ from pathlib import Path
 
 # Naver Maps API endpoint configuration
 NAVER_BASE_URL = "https://map.pstatic.net/nvbpc/wmts/panorama"
-NAVER_API_KEY = os.getenv("NAVER_API_KEY", "c9d936c2-23bf-4a91-82fc-5d03e9b6ad01") #default api key
+NAVER_API_KEY = os.getenv(
+    "NAVER_API_KEY", "c9d936c2-23bf-4a91-82fc-5d03e9b6ad01"
+)  # default api key
 NAVER_ENDPOINT_TEMPLATE = f"{NAVER_BASE_URL}/{NAVER_API_KEY}/getTile/{{x}}/{{y}}/{{z}}/pbf"
 
 # Default zoom level for data collection
@@ -28,10 +30,10 @@ BOUNDS_GEOJSON_FILE = "boundings.geojson"
 # Tile coordinate bounds (will be calculated from GeoJSON)
 # These are approximate bounds for Korea at zoom level 17
 TILE_BOUNDS = {
-    'min_x': 50000,  # Will be calculated from GeoJSON
-    'max_x': 60000,  # Will be calculated from GeoJSON
-    'min_y': 30000,  # Will be calculated from GeoJSON
-    'max_y': 40000   # Will be calculated from GeoJSON
+    "min_x": 50000,  # Will be calculated from GeoJSON
+    "max_x": 60000,  # Will be calculated from GeoJSON
+    "min_y": 30000,  # Will be calculated from GeoJSON
+    "max_y": 40000,  # Will be calculated from GeoJSON
 }
 
 # =============================================================================
@@ -77,14 +79,14 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # HTTP headers
 DEFAULT_HEADERS = {
-    'User-Agent': USER_AGENT,
-    'Accept': 'application/x-protobuf,*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate',  # Removed 'br' (brotli) to avoid compression issues
-    'Connection': 'keep-alive',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'cross-site',  # Changed from 'same-origin' since we're calling external API
+    "User-Agent": USER_AGENT,
+    "Accept": "application/x-protobuf,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",  # Removed 'br' (brotli) to avoid compression issues
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",  # Changed from 'same-origin' since we're calling external API
 }
 
 # =============================================================================
@@ -140,40 +142,43 @@ EMOJI_TILE = "🔲"
 # UTILITY FUNCTIONS
 # =============================================================================
 
+
 def get_session_dir(session_number: int) -> Path:
     """
     Get the session directory path for a given session number.
-    
+
     Args:
         session_number: The session number (1, 2, 3, ...)
-        
+
     Returns:
         Path object pointing to the session directory
     """
     return Path(BASE_DATA_DIR) / RAW_DATA_DIR / str(session_number)
 
+
 def get_log_file_path(session_number: int) -> Path:
     """
     Get the log file path for a given session.
-    
+
     Args:
         session_number: The session number
-        
+
     Returns:
         Path object pointing to the log file
     """
     return get_session_dir(session_number) / LOG_FILENAME
 
+
 def get_tile_file_path(session_number: int, z: int, x: int, y: int) -> Path:
     """
     Get the file path for a specific tile.
-    
+
     Args:
         session_number: The session number
         z: Zoom level
         x: Tile X coordinate
         y: Tile Y coordinate
-        
+
     Returns:
         Path object pointing to the tile file
     """

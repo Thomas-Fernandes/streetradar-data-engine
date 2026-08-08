@@ -28,7 +28,8 @@ import asyncio
 import random
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -106,6 +107,10 @@ class HttpPolicy:
     proxies: Sequence[str] = ()
     proxy_cooldown: float = 300.0
     headers: dict[str, str] = field(default_factory=dict)
+    # Makes aiohttp read HTTP_PROXY/HTTPS_PROXY. The only way to put a proxy
+    # in front of a library that owns its own requests, at the cost of it
+    # being one static proxy rather than a rotating pool.
+    trust_env: bool = False
 
     @classmethod
     def from_env(cls, prefix: str = "SCRAPE", **overrides: Any) -> HttpPolicy:
@@ -237,6 +242,7 @@ class HttpClient:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.policy.timeout),
             headers=headers,
+            trust_env=self.policy.trust_env,
         )
         logger.debug(
             "http client ready (concurrency=%d, proxies=%d, budget=%s/h)",
@@ -250,6 +256,37 @@ class HttpClient:
         if self._session is not None:
             await self._session.close()
             self._session = None
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        """The underlying session, for libraries that insist on owning the call.
+
+        `streetlevel.ja.find_panorama_async` and its siblings take a session and
+        make the request themselves, so ja and mapy cannot go through
+        `get_bytes`. Handing them this session at least gives their requests our
+        User-Agent, headers and timeout.
+
+        What it does NOT give them is retries, backoff or proxy rotation —
+        those live in `_request`, which never runs for these calls. Wrap them in
+        `guard()` for the budget and concurrency ceiling, and set
+        `trust_env=True` with HTTPS_PROXY if they need to go through a proxy at
+        all. This is a real gap, not an oversight: closing it properly means
+        streetlevel accepting a request hook.
+        """
+        if self._session is None:
+            raise HttpError("HttpClient must be used as an async context manager")
+        return self._session
+
+    @asynccontextmanager
+    async def guard(self) -> AsyncIterator[None]:
+        """Apply the request budget and concurrency ceiling to a foreign call.
+
+        async with http.guard():
+            pano = await find_panorama_async(lat, lon, http.session)
+        """
+        await self.budget.acquire()
+        async with self._semaphore:
+            yield
 
     async def get_bytes(self, url: str, *, missing_ok: bool = False, **kwargs: Any) -> bytes | None:
         """GET a URL and return the body, retrying per policy.

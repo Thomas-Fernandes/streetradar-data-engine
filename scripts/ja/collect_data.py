@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
 
 from streetlevel.ja import find_panorama_async, find_panorama_by_id_async
 
+from streetradar.http import HttpClient, HttpPolicy
+
 # Zone configuration
 ZONES = {
     1: {
@@ -87,7 +89,8 @@ class JA360Scraper:
         self.last_periodic_log_time = time.time()  # For periodic logs
 
         # Semaphore to limit concurrency
-        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+        # Concurrency now lives in the HttpClient built in the run method.
+        self.http: HttpClient | None = None
 
         self.log_and_print(f"🇮🇸 JA360 Panorama Scraper - Zone: {self.zone_name}")
         self.log_and_print(f"📍 {self.zone['description']}")
@@ -187,7 +190,12 @@ class JA360Scraper:
         self, session: aiohttp.ClientSession, panoid: int
     ) -> dict | None:
         """Retrieve complete details of a panorama"""
-        async with self.semaphore:
+        if self.http is None:
+            raise RuntimeError("fetch_panorama_details called outside the run() HTTP client")
+
+        # guard() replaces the bare semaphore: same concurrency ceiling, plus
+        # the requests-per-hour budget from SCRAPE_JA_REQUESTS_PER_HOUR.
+        async with self.http.guard():
             try:
                 self.total_requests += 1
 
@@ -345,19 +353,27 @@ class JA360Scraper:
     async def scrape(self):
         """Main scraping with optimized BFS"""
         # Optimized connector configuration
-        connector = aiohttp.TCPConnector(
-            limit=MAX_CONCURRENT * 2,  # Larger connection pool
-            limit_per_host=MAX_CONCURRENT,
-            keepalive_timeout=60,  # Keep connections longer
-            enable_cleanup_closed=True,
-        )
-        timeout = aiohttp.ClientTimeout(
-            total=NETWORK_TIMEOUT + 5,  # Slightly higher global timeout
-            connect=5,  # Fast connection timeout
-            sock_read=NETWORK_TIMEOUT,  # Read timeout
+        # Partial adoption of the shared layer, and worth being precise about
+        # what that buys. streetlevel's find_panorama_async makes the request
+        # itself, so it cannot go through HttpClient.get_bytes the way Naver
+        # does. What it does get is our session — User-Agent, headers, timeout —
+        # plus the request budget and concurrency ceiling via `guard()`.
+        #
+        # It does NOT get retries, backoff or proxy rotation: those live in the
+        # request path streetlevel bypasses. For a proxy here, set
+        # SCRAPE_JA_TRUST_ENV=1 and HTTPS_PROXY, which gives one static proxy
+        # rather than a rotating pool.
+        self.http_policy = HttpPolicy.from_env(
+            "SCRAPE_JA",
+            max_concurrency=MAX_CONCURRENT,
+            timeout=float(NETWORK_TIMEOUT + 5),
+            trust_env=os.getenv("SCRAPE_JA_TRUST_ENV", "") not in ("", "0"),
         )
 
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with HttpClient(self.http_policy) as http:
+            self.http = http
+            session = http.session
+
             # 1. Find the starting panorama
             start_id = await self.find_starting_panorama(session)
             if not start_id:

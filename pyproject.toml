@@ -39,6 +39,10 @@ dependencies = [
     "scipy==1.16.0",
     "shapely==2.1.1",
     "streetlevel==0.12.4",
+    # Not imported by any of our code. It arrives through streetlevel ->
+    # pyequilib and is declared here only so the CPU-index pin below applies —
+    # `tool.uv.sources` does not reach transitive dependencies.
+    "torch==2.13.0",
     "uvloop==0.21.0",
 ]
 
@@ -58,6 +62,19 @@ testpaths = ["tests"]
 # Every test in tests/test_http.py is a coroutine; marking each one individually
 # adds noise and is easy to forget, which makes the test silently pass.
 asyncio_mode = "auto"
+
+# streetlevel depends on pyequilib, which depends on torch. The default wheel
+# drags in the whole CUDA runtime — nvidia/* alone is 2.7 GB — for a pipeline
+# that never touches a GPU and only uses streetlevel to read panorama metadata.
+# Pinning torch to the CPU index takes the container from 5.8 GB to roughly a
+# quarter of that.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 100

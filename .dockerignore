@@ -1,0 +1,17 @@
+# Keep the build context small: `data/` alone runs to gigabytes and would be
+# uploaded to the daemon on every build.
+data/
+airflow/
+venv/
+.venv/
+.git/
+.github/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.log
+.env
+*.env
+tests/

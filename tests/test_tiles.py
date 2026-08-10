@@ -215,3 +215,47 @@ class TestHarvestPyramid:
             async for r in harvest_pyramid(stub, src, target_zoom=1, has_content=lambda body: False)
         ]
         assert {r.tile.z for r in got} == {0}
+
+    async def test_descent_stays_inside_the_area_of_interest(self) -> None:
+        # Regression: tile edges do not align with a bounding box, so the
+        # children of the tiles that merely overlap the box cover a strictly
+        # larger area. Unfiltered, a descent over the Reykjavik box collected 18%
+        # more road length than a flat sweep of the same box — all of it outside
+        # the box. Filtering makes the two agree exactly.
+        src = TileSource(
+            id="quadrant",
+            url_template="https://example.invalid/{z}/{x}/{y}",
+            min_zoom=0,
+            max_zoom=4,
+            bounds=(-170.0, 10.0, -100.0, 60.0),
+        )
+        everything = {
+            Tile(z, x, y) for z in range(0, 5) for x in range(0, 1 << z) for y in range(0, 1 << z)
+        }
+        stub = StubFetcher(with_content=everything)
+
+        got = [r async for r in harvest_pyramid(stub, src, target_zoom=4)]
+
+        west, south, east, north = src.bounds
+        for result in got:
+            t_west, t_south, t_east, t_north = result.tile.bounds
+            assert t_east > west and t_west < east
+            assert t_north > south and t_south < north
+
+    async def test_descent_and_flat_sweep_agree_on_the_target_zoom(self) -> None:
+        # The property that makes the descent usable at all: when content exists
+        # at every level, descending must reach exactly the tiles a flat sweep
+        # would. Verified against the live Ja source too — 13,665 lines and
+        # 1866.6 km either way over the capital region.
+        src = source(min_zoom=0, max_zoom=3)
+        everything = {
+            Tile(z, x, y) for z in range(0, 4) for x in range(0, 1 << z) for y in range(0, 1 << z)
+        }
+        flat_stub = StubFetcher(with_content=everything)
+        deep_stub = StubFetcher(with_content=everything)
+
+        flat = {r.tile async for r in harvest_flat(flat_stub, src, 3)}
+        descended = {
+            r.tile async for r in harvest_pyramid(deep_stub, src, target_zoom=3) if r.tile.z == 3
+        }
+        assert descended == flat

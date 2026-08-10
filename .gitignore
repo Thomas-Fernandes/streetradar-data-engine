@@ -44,3 +44,6 @@ __pycache__/
 # limiting is politeness, rotation is evasion (docs/adr/0007-robots-handling.md).
 # If such a file ever reappears, it should be loudly visible, not silently
 # ignored.
+
+# Playwright MCP scratch output
+.playwright-mcp/

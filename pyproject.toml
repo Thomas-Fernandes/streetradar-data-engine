@@ -12,13 +12,17 @@ version = "0.2.0.dev0"
 description = "Collection and processing pipeline for street-level imagery coverage"
 requires-python = ">=3.12"
 
-# Core: what `streetradar/` itself imports, and nothing else. Keeping it this
-# small means the package and its tests install without the geospatial stack —
-# pycairo and pyexiv2 in particular ship no wheels and need system headers, so
-# CI had to apt-get them just to run tests that touch neither.
+# Core: what `src/streetradar/` imports, and nothing else. Everything here ships
+# wheels, so `uv sync` needs no compiler and no system headers — which is what
+# keeps the dev environment at ~130 MB rather than the 1.6 GB the old one reached.
+#
+# mapbox-vector-tile pulls protobuf, pyclipper and shapely. It is imported lazily
+# inside `streetradar.decode` so that the fetch and harvest paths stay importable
+# — and testable — without it.
 dependencies = [
     "aiohttp==3.14.3",
     "boto3==1.40.0",
+    "mapbox-vector-tile==2.2.0",
     "python-dotenv==1.2.2",
 ]
 

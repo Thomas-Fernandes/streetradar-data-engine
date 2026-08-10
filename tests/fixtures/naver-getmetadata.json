@@ -1,0 +1,76 @@
+{
+  "bounds": [
+    122.778048538,
+    32.0060170503,
+    132.397864713,
+    43.0060170503
+  ],
+  "scheme": "xyz",
+  "name": "panorama",
+  "format": "pbf",
+  "profile": "mercator",
+  "version": "1.0.0",
+  "versionCode": "c315d97e-8055-43e8-9d8e-f8fdd3effaac",
+  "versionTime": 1785735016393,
+  "dataset": "R_20260803_1429",
+  "attribution": "ⓒ NAVER Corp.",
+  "tilejson": "2.1.0",
+  "tiles": [
+    "https://map.pstatic.net/nvbpc/wmts/panorama/c315d97e-8055-43e8-9d8e-f8fdd3effaac/getTile/{x}/{y}/{z}/pbf"
+  ],
+  "maxzoom": 22,
+  "minzoom": 6,
+  "vector_layers": [
+    {
+      "id": "street_link_l",
+      "description": "street_link_l",
+      "minzoom": 6,
+      "maxzoom": 22,
+      "fields": {
+        "$DP_FLAG": "Number",
+        "dp_link_k": "Number",
+        "dp_level": "Number",
+        "dp_road_k": "Number",
+        "road_k": "Number"
+      },
+      "sourceLayers": [
+        {
+          "localName": "street_link_l",
+          "minLevel": 6,
+          "maxLevel": 6,
+          "layerFilter": "(\"dp_road_k\" In ('1') AND \"dp_link_k\" In ('1', '2'))"
+        },
+        {
+          "localName": "street_link_l",
+          "minLevel": 7,
+          "maxLevel": 7,
+          "layerFilter": "(\"dp_road_k\" In ('1', '2', '3') AND \"dp_link_k\" In ('1', '2'))"
+        },
+        {
+          "localName": "street_link_l",
+          "minLevel": 8,
+          "maxLevel": 8,
+          "layerFilter": "(\"dp_road_k\" In ('1', '2', '3', '4', '5') AND \"dp_link_k\" In ('1', '2'))"
+        },
+        {
+          "localName": "street_link_l",
+          "minLevel": 9,
+          "maxLevel": 11,
+          "layerFilter": "(((\"dp_road_k\" In ('1', '2', '3', '4', '5') AND \"dp_link_k\" In ('1', '2')) OR ((\"dp_road_k\" In ('6') AND \"dp_link_k\" In ('1', '2')) AND \"dp_level\" In ('1', '2'))) OR \"road_k\" = 0)"
+        },
+        {
+          "localName": "street_link_l",
+          "minLevel": 12,
+          "maxLevel": 14,
+          "layerFilter": "(((\"dp_road_k\" In ('1', '2', '3', '4', '5') AND \"dp_link_k\" In ('1', '12', '2', '3', '4', '5', '7', '8')) OR ((\"dp_road_k\" In ('6') AND \"dp_link_k\" In ('1', '12', '2', '3', '4', '5', '7', '8')) AND \"dp_level\" In ('1', '2', '3'))) OR \"road_k\" = 0)"
+        },
+        {
+          "localName": "street_link_l",
+          "minLevel": 15,
+          "maxLevel": 22,
+          "layerFilter": "(((\"dp_road_k\" In ('1', '2', '3', '4', '5') AND \"dp_link_k\" In ('1', '12', '2', '3', '4', '5', '7', '8')) OR ((\"dp_road_k\" In ('6') AND \"dp_link_k\" In ('1', '12', '2', '3', '4', '5', '7', '8')) AND \"dp_level\" In ('1', '2', '3'))) OR \"road_k\" = 0)"
+        }
+      ]
+    }
+  ]
+}

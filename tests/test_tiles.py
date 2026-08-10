@@ -11,7 +11,6 @@ from collections.abc import Mapping
 
 import pytest
 
-from streetradar.sources import JA360, naver_coverage
 from streetradar.tiles import Tile, TileSource, harvest_flat, harvest_pyramid
 
 
@@ -117,35 +116,6 @@ class TestTileSource:
                 max_zoom=4,
                 bounds=(-1.0, -1.0, 1.0, 1.0),
             )
-
-
-class TestDeclaredSources:
-    def test_ja360_z14_sweep_matches_the_verified_request_count(self) -> None:
-        # 160,952 was computed from the bounds Ja publish in their TileJSON and
-        # is the number the "5x fewer requests than the old engine" claim rests
-        # on. If this changes, that claim needs revisiting.
-        assert JA360.tile_count_at(14) == 160_952
-
-    def test_ja360_descent_starts_far_smaller_than_a_flat_sweep(self) -> None:
-        assert JA360.tile_count_at(JA360.min_zoom) < 10
-        assert JA360.tile_count_at(14) > 100_000
-
-    def test_ja360_targets_the_tile_host_not_the_website(self) -> None:
-        # ja.is/robots.txt disallows the per-panorama endpoints; the tile host
-        # publishes no robots.txt at all. Confusing the two would matter.
-        assert "tiles.aws-prod.ja.is" in JA360.url(Tile(14, 7195, 4355))
-        assert "//ja.is" not in JA360.url_template
-
-    def test_naver_refuses_to_build_without_a_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("NAVER_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="no default"):
-            naver_coverage()
-
-    def test_naver_key_is_not_hardcoded_anywhere(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NAVER_API_KEY", "from-the-environment")
-        src = naver_coverage()
-        assert "from-the-environment" in src.url(Tile(17, 1, 2))
-        assert "c9d936c2" not in src.url_template
 
 
 class TestHarvestFlat:

@@ -62,19 +62,16 @@ providers = [
 ]
 
 [dependency-groups]
-# ruff and mypy are pinned exactly: the mypy error count in .mypy-baseline is
-# version-sensitive, so a floating version would make the CI ratchet drift on
-# its own.
+# ruff and mypy are pinned exactly. CI blocks on zero mypy errors under
+# `strict`, and a floating version would turn an upstream release into a
+# surprise red build on an unrelated PR.
 dev = ["ruff==0.16.2", "mypy==2.3.0", "pytest>=8.4", "pytest-asyncio>=1.0"]
 
 [tool.pytest.ini_options]
-# There is no test suite yet: it arrives with the work queue, whose tests *are*
-# the deliverable (docs/MIGRATION.md step 3). Until then pytest collects nothing
-# and exits 5, which CI tolerates explicitly.
-#
-# `norecursedirs` is load-bearing rather than tidy. Without a `testpaths` to scope
-# it, pytest walks the rootdir and tries to collect `archive/tests/`, whose
-# imports no longer resolve — 4 collection errors and 92 seconds.
+testpaths = ["tests"]
+# Belt and braces alongside testpaths: unscoped, pytest walks the rootdir and
+# tries to collect `archive/tests/`, whose imports no longer resolve — 4
+# collection errors and 92 seconds.
 norecursedirs = ["archive", "data", ".venv", ".git"]
 # Collectors and fetchers are coroutines throughout; marking each test
 # individually is noise and is easy to forget, which makes a test silently pass.
@@ -122,8 +119,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-# `tests` is added back alongside the first test suite (docs/MIGRATION.md step 3).
-files = ["src"]
+files = ["src", "tests"]
 mypy_path = "src"
 
 # Strict from the first commit of the rebuild, with a zero-error baseline.

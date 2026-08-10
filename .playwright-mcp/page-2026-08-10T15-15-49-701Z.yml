@@ -1,0 +1,60 @@
+- generic [ref=e1]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - region [ref=e6]
+      - generic: 50 km
+      - generic:
+        - generic [ref=e8]: 
+        - generic [ref=e11]: 
+        - link [ref=e15] [cursor=pointer]:
+          - /url: "#"
+          - generic [ref=e16]: 
+        - generic [ref=e17]:
+          - button [ref=e18] [cursor=pointer]
+          - button [ref=e20] [cursor=pointer]
+          - button [ref=e22]
+    - generic [ref=e24]:
+      - link "" [ref=e25] [cursor=pointer]:
+        - /url: "#"
+      - link " Deila korti" [ref=e27] [cursor=pointer]:
+        - /url: "#"
+        - generic [ref=e28]: 
+        - generic [ref=e29]: Deila korti
+    - generic [ref=e30]:
+      - generic [ref=e31]:
+        - generic [ref=e33]:
+          - link [ref=e34] [cursor=pointer]:
+            - /url: /
+            - img "Já" [ref=e35]
+            - img "Já" [ref=e36]
+          - searchbox "Hvað viltu finna?" [active] [ref=e37]
+          - text: 
+        - generic:
+          - generic [ref=e38]:
+            - link " Vegvísun" [ref=e39] [cursor=pointer]:
+              - /url: "#"
+              - generic [ref=e40]: 
+              - generic [ref=e41]: Vegvísun
+            - link " 360° götusýn" [ref=e42] [cursor=pointer]:
+              - /url: "#"
+              - generic [ref=e43]: 
+              - generic [ref=e44]: 360° götusýn
+          - generic:  
+      - text:         
+    - generic [ref=e46]:
+      - generic [ref=e47] [cursor=pointer]:
+        - paragraph [ref=e48]: Skoða niðurstöðulista
+        - text: 
+      - generic [ref=e49]:
+        - list
+      - generic [ref=e50]:
+        - link "" [ref=e51] [cursor=pointer]:
+          - /url: "#"
+        - link "" [ref=e53] [cursor=pointer]:
+          - /url: "#"
+      - link "Leita á öllu kortinu" [ref=e56] [cursor=pointer]:
+        - /url: "#"
+  - link "Ábendingar" [ref=e58] [cursor=pointer]:
+    - /url: "#"
+  - link "Flakk" [ref=e60] [cursor=pointer]:
+    - /url: /flakk/

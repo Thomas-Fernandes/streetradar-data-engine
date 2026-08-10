@@ -1,28 +1,46 @@
-/venv
+# Virtualenvs
+.venv/
+venv/
+
+# Python
 __pycache__/
-/checkpoints
-current_session.json
+*.py[cod]
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
 .env
 *.env
-
-# Proxy
-proxy.py
-
-# Data
-/data
-
-# Airflow
-/airflow
-/airflow/logs/
-/airflow/*.db
-*.log
-simple_auth_manager_passwords.json*
-
-# API Keys and secrets
 *secret*
 *key*.json
 *credentials*
 
+# Data tree: raw fetches, Parquet parts, SQLite work queues, tile builds.
+# Everything here is reproducible from a run, or archived to R2.
+/data
+
+# Design documents: audit, target architecture, migration plan, ADRs.
+#
+# Kept out of version control by choice. Note the consequence: unlike /data,
+# these are NOT reproducible — they are the only copy, and `git clean -xdf`
+# removes them. Back them up somewhere, or move them to a private repository.
+/docs
+
+# Logs
+*.log
+
 # Temporary files
 *.tmp
 *.temp
+
+# Deliberately NOT ignored: proxy configuration.
+#
+# The previous engine ignored `proxy.py`, which meant five commercial proxy
+# endpoints with plaintext credentials sat on disk for months without ever
+# appearing in `git status`. This project does not use proxies at all — rate
+# limiting is politeness, rotation is evasion (docs/adr/0007-robots-handling.md).
+# If such a file ever reappears, it should be loudly visible, not silently
+# ignored.

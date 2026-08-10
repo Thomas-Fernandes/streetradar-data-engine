@@ -55,30 +55,42 @@ jobs:
               with:
                   enable-cache: true
 
-            # Core dependencies only — no `--extra providers`. The tests cover
-            # streetradar/, which needs aiohttp, boto3 and dotenv and nothing
-            # that builds from source, so this step needs no system packages.
+            # Core dependencies only — no `--extra providers`. That extra pulls
+            # the geospatial stack, two of whose packages build from source and
+            # need system headers; nothing under `src/` requires them yet.
             #
-            # The provider scripts stay untested until they are ported onto the
-            # shared package; testing code that is about to be rewritten buys
-            # nothing.
+            # `archive/` is never tested. It is the previous engine, kept as a
+            # reference and a regression oracle, and it is not maintained —
+            # see archive/README.md.
+            #
+            # Exit code 5 means "no tests collected", which is the correct state
+            # until the work queue lands with its suite (docs/MIGRATION.md step 3).
+            # The job stays wired up rather than deleted so that the day a test
+            # appears, CI enforces it without anyone remembering to re-add this.
             - name: Run tests
-              run: uv run pytest -q
+              run: |
+                  uv run pytest -q || status=$?
+                  if [ "${status:-0}" -eq 5 ]; then
+                      echo "::notice::No tests collected yet — see docs/MIGRATION.md step 3."
+                      exit 0
+                  fi
+                  exit "${status:-0}"
 
     typecheck:
-        name: Typecheck (ratchet)
+        name: Typecheck (strict)
         runs-on: ubuntu-latest
 
         # Same draft guard as the lint job above.
         if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
 
-        # The codebase is untyped and mypy currently reports a fixed number of
-        # pre-existing errors, recorded in .mypy-baseline. Blocking on zero would
-        # leave CI permanently red and therefore ignored; blocking on "no worse
-        # than before" makes it useful today and lets the number be driven down.
+        # The ratchet is gone. It existed because the old engine reported 58
+        # pre-existing errors across 7 files and blocking on zero would have left
+        # CI permanently red and therefore ignored. Moving that engine to
+        # `archive/` and excluding it made a genuine zero possible, so this job
+        # blocks on zero under `strict = true`.
         #
-        # When the count reaches zero, delete .mypy-baseline and replace this job
-        # with a plain `uv run --only-group dev mypy .`.
+        # No arguments: mypy reads `files = ["src", "tests"]` from pyproject.toml.
+        # Passing `mypy .` would override it and walk `archive/` too.
         steps:
             - uses: actions/checkout@v4
 
@@ -86,24 +98,5 @@ jobs:
               with:
                   enable-cache: true
 
-            - name: Compare the error count against the baseline
-              run: |
-                  baseline=$(cat .mypy-baseline)
-                  uv run --only-group dev mypy . > mypy-report.txt 2>&1 || true
-                  current=$(grep -cE '^[^ ].*: error:' mypy-report.txt || true)
-
-                  echo "baseline: $baseline"
-                  echo "current:  $current"
-                  echo
-
-                  if [ "$current" -gt "$baseline" ]; then
-                      echo "::error::mypy errors went up: $baseline -> $current"
-                      echo "New type errors were introduced. The report follows."
-                      cat mypy-report.txt
-                      exit 1
-                  fi
-
-                  if [ "$current" -lt "$baseline" ]; then
-                      echo "::notice::mypy errors went down: $baseline -> $current."
-                      echo "Lower the number in .mypy-baseline to $current to lock the gain in."
-                  fi
+            - name: Typecheck
+              run: uv run --only-group dev mypy

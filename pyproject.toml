@@ -3,11 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["streetradar"]
+packages = ["src/streetradar"]
 
 [project]
 name = "streetradar-data-engine"
-version = "0.1.0"
+# 0.2.0.dev0 marks the rebuild. 0.1.x is the engine now under `archive/`.
+version = "0.2.0.dev0"
 description = "Collection and processing pipeline for street-level imagery coverage"
 requires-python = ">=3.12"
 
@@ -22,8 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Everything the provider scripts under scripts/ need. Install with
-# `uv sync --extra providers`; the container does this, CI does not.
+# NOTE (rebuild): this extra still describes what the *archived* engine needed.
+# It is left intact so `archive/` stays runnable as a reference oracle, and will
+# be rebuilt as the new core lands. Three of these are already slated to go —
+# pycairo (replaced by tippecanoe), pyexiv2 (no EXIF is ever read) and geopandas
+# (replaced by shapely + DuckDB spatial) — and torchvision must be added for
+# streetlevel.lookaround to import at all. See docs/ARCHITECTURE.md §0.
 #
 # Versions are pinned because GeoPandas, Shapely and DuckDB break their APIs
 # across majors, and an unpinned requirements.txt is what made the pipeline
@@ -63,9 +68,16 @@ providers = [
 dev = ["ruff==0.16.2", "mypy==2.3.0", "pytest>=8.4", "pytest-asyncio>=1.0"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-# Every test in tests/test_http.py is a coroutine; marking each one individually
-# adds noise and is easy to forget, which makes the test silently pass.
+# There is no test suite yet: it arrives with the work queue, whose tests *are*
+# the deliverable (docs/MIGRATION.md step 3). Until then pytest collects nothing
+# and exits 5, which CI tolerates explicitly.
+#
+# `norecursedirs` is load-bearing rather than tidy. Without a `testpaths` to scope
+# it, pytest walks the rootdir and tries to collect `archive/tests/`, whose
+# imports no longer resolve — 4 collection errors and 92 seconds.
+norecursedirs = ["archive", "data", ".venv", ".git"]
+# Collectors and fetchers are coroutines throughout; marking each test
+# individually is noise and is easy to forget, which makes a test silently pass.
 asyncio_mode = "auto"
 
 # streetlevel depends on pyequilib, which depends on torch. The default wheel
@@ -84,7 +96,14 @@ torch = { index = "pytorch-cpu" }
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["venv", "data"]
+# `archive/` is the previous engine, kept as a reference and a regression oracle.
+# It is deliberately not linted, not typed and not fixed — see archive/README.md.
+#
+# `docs/` is excluded because ruff formats Python inside Markdown code fences,
+# and the snippets there are illustrative: deliberately column-aligned to show
+# which layer owns which call, and sometimes referencing names that do not exist
+# yet. Formatting them destroys the alignment that is the point of the example.
+extend-exclude = ["archive", "data", "docs"]
 
 [tool.ruff.lint]
 select = [
@@ -103,22 +122,23 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["streetradar", "scripts", "tests"]
-exclude = "(venv|data)/"
+# `tests` is added back alongside the first test suite (docs/MIGRATION.md step 3).
+files = ["src"]
+mypy_path = "src"
 
-# Every provider ships its own collect_data.py / process_data.py / upload_r2.py,
-# so module names collide three ways. These two settings make mypy key on the
-# full path instead. The real fix is the shared package that removes the
-# duplication in the first place.
-explicit_package_bases = true
-namespace_packages = true
-mypy_path = "."
+# Strict from the first commit of the rebuild, with a zero-error baseline.
+#
+# The old engine reported 58 errors across 7 files and CI could only ratchet
+# against that count (.mypy-baseline, now deleted). Excluding `archive/` is what
+# made a clean zero possible, and starting strict is the only moment it is free —
+# retrofitting strictness is what produced the 58 in the first place.
+strict = true
 
-# The codebase is currently untyped. These stay permissive so mypy reports
-# real contradictions instead of 6,800 lines of missing-annotation noise;
-# tighten them module by module as the shared package lands in Phase 2.
-ignore_missing_imports = true
-check_untyped_defs = false
-disallow_untyped_defs = false
+# Third-party geospatial and provider libraries ship no stubs. Reported per
+# module rather than globally, so a missing stub is a visible decision.
 warn_unused_ignores = true
 warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*"]
+ignore_missing_imports = true

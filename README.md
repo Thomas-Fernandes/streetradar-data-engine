@@ -1,97 +1,108 @@
 # StreetRadar Data Engine
 
-A comprehensive data collection and processing pipeline for street-level imagery from multiple mapping providers. This system collects panoramic street view data, processes it into standardized formats, and generates optimized tile sets for web applications.
+The engine behind [streetradar.app](https://streetradar.app) — a map of where
+street-level imagery exists, across providers.
 
-## 🌍 Supported Providers
+It collects **coverage**, not imagery: where panoramas exist and when they were
+captured. The output is dated vector tiles, published as PMTiles.
 
-| Provider | Data Collection | Processing | OSM Matching | Tile Generation | R2 Upload |
-|----------|:---------------:|:----------:|:------------:|:---------------:|:---------:|
-| **JA360** (Iceland) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Naver** (South Korea) | ✅ | ✅ | ❌ | ✅ | ✅ |
-| **Mapy.cz** (Czech Republic) | ⚠️ | ✅ | ❌ | ❌ | ❌ |
+> ### 🚧 Being rebuilt
+>
+> The engine is currently being rebuilt from scratch. The previous version — three
+> unrelated pipelines, ~6,700 lines, last published output 11–14 months old — has
+> been moved wholesale to [`archive/`](archive/README.md) and is kept as a
+> reference and a regression oracle. Nothing in `archive/` runs.
+>
+> `src/` is where the new engine lives. It is currently a skeleton.
+>
+## Design documents
 
-## 🏗️ Architecture Overview
+The audit of the previous engine, the target architecture, the migration plan and
+nine decision records are maintained **outside this repository** (`docs/`, not
+version-controlled). They cover, in order:
 
-As of now, the architecture looks like this:
+- **Audit** — what the old engine did, module by module, with measured volumes and
+  20 findings ranked by severity
+- **Architecture** — provider abstraction, pipeline stages, data model with capture
+  dates, tile format, storage tiering, orchestration, alerting, observability, cost
+  model
+- **Migration** — 16 ordered steps, each independently shippable
+- **ADRs** — clean break, tile format, orchestrator, status page, storage
+  placement, the retired `Provider` ABC, `robots.txt` handling, enumeration
+  strategy, `streetlevel` usage
 
-```mermaid
-graph LR
-    A[Raw Data Collection] --> B[Data Processing]
-    B --> C{Provider Type}
-    
-    C -->|JA360| D[OSM Matching]
-    C -->|Naver| E[Tile Generation]
-    C -->|Mapy.cz| F[Data Storage]
-    
-    D --> G[Tile Generation]
-    E --> H[R2 Upload]
-    G --> H
-    
-    H --> I[Public Tile Server]
-    F --> J[Archive Storage]
-```
+## Providers
 
-## 📁 Data Structure
+| Provider | Region | Status | Time dimension |
+| --- | --- | --- | --- |
+| Já 360 | Iceland | first target of the rebuild | yes — month precision |
+| Apple Look Around | global | to build; no source ever existed | yes — full UTC timestamp |
+| Naver | South Korea | to port | **no** — the provider's tiles carry no date |
+| Mapy.cz | Czechia | 16.2M records collected, never published | yes — full date |
+| Mapillary, Panoramax | open data | planned | yes |
 
-```
-data/
-├── ja360/
-│   ├── raw/           # Raw collected data
-│   ├── processed/     # Cleaned and processed data
-│   ├── matched/       # OSM-matched data
-│   └── tile/          # Generated PMTiles
-├── naver/
-│   ├── raw/           # Session-based raw tiles
-│   ├── processed/     # Processed coverage data
-│   └── tile/          # Generated PMTiles
-└── mapy/
-    ├── raw/           # Raw panorama data
-    └── processed/     # Processed data
-```
+Google, Bing and Yandex stay client-side hotlinks with **no server-side
+collection**. That is a deliberate and permanent scope decision.
 
-## 🛠️ Development
+## Design rules that are not negotiable
 
-### Code Structure
+These are the invariants the rebuild is organised around. Everything else is open
+to discussion.
 
-- `streetradar/` - Shared package: HTTP layer, R2 storage, config, logging
-- `scripts/` - Provider-specific collection and processing
-- `tests/` - Tests for the shared package
+1. **One outbound path.** Every request goes through `streetradar.fetch`, which
+   is the only place that knows about `robots.txt`, per-host budgets, retries and
+   metrics. No proxies, no rotation, no detection evasion — rate limiting is
+   politeness, rotation is evasion.
+2. **Claimable, persisted work units.** Nothing is marked done before its rows
+   are durable. A `kill -9` at hour 200 loses at most one shard.
+3. **`decode` is pure**, does no I/O, and is tested against a recorded fixture.
+4. **Nothing publishes without a finished run** plus a `verify_tiles` gate.
+5. **Versioned keys and a `latest.json` pointer.** A live object is never
+   overwritten.
+6. **A three-level provider kill switch**, matching the front end's, before
+   anything is scheduled.
+7. **A bounded probe (≤ 2,000 requests) before each collector.** Enumeration
+   strategy is measured, not inherited.
+8. **Capture dates are first-class**, with an explicit precision so the front end
+   never over-claims.
 
-### Setup
-
-```bash
-uv sync --extra providers   # everything the provider scripts need
-uv sync                     # shared package only, enough to run the tests
-```
-
-`--extra providers` pulls the geospatial stack. Two of its packages, pycairo
-and pyexiv2, build from source and need `libcairo2-dev` and `libexiv2-dev`.
-
-### Running the pipeline
-
-Each stage is a one-shot container; see `docker-compose.yml`.
+## Development
 
 ```bash
-docker compose run --rm ja-collect
-docker compose run --rm ja-tiles && docker compose run --rm ja-upload
+uv sync                      # core + dev: enough to run the tests
+uv sync --extra providers    # adds the geospatial stack (still sized for archive/)
 ```
 
-Scheduling is host cron rather than a scheduler in the image. Airflow was
-removed: three monthly pipelines did not justify a scheduler, a webserver and
-a metadata database running permanently, and its dependency tree carried the
-only critical security advisories in the project.
-
-### Rate limits and proxies
-
-Every outbound request from a ported collector goes through
-`streetradar.http`, configured per provider with `SCRAPE_<PROVIDER>_*`:
+Quality gates, all blocking in CI:
 
 ```bash
-SCRAPE_NAVER_MAX_CONCURRENCY=32
-SCRAPE_NAVER_REQUESTS_PER_HOUR=20000
-SCRAPE_NAVER_PROXIES=http://user:pass@host:port,http://...
+uv run ruff check . && uv run ruff format --check .
+uv run mypy                  # strict, zero errors — archive/ is excluded
+uv run pytest -q
+uv lock --check
 ```
 
-Naver routes through it fully. Já only partially — `streetlevel` issues its own
-requests, so it gets the budget and concurrency ceiling but not retries,
-backoff or proxy rotation.
+`mypy` runs with `strict = true` and a zero-error baseline. That was only
+possible because `archive/` is excluded — the old engine reported 58 errors
+across 7 files and CI could only ratchet against the count.
+
+## Layout
+
+```
+src/streetradar/     the engine (skeleton — the migration plan gives the order)
+archive/             the previous engine — reference only, never run
+tests/               arrives with the work queue, whose tests are the deliverable
+flows/               Prefect deployments (not yet created)
+
+docs/                not in version control — see "Design documents" above
+data/                not in version control — raw fetches, Parquet parts,
+                     work queues, tile builds; reproducible or archived to R2
+```
+
+## Related
+
+The front end lives in a separate repository and deploys to Vercel. The contract
+between the two is two JSON documents published to R2 — `latest.json` (which
+archive to load per provider) and `status.json` (engine and run state, rendered
+at `/status`). Keeping them separate is deliberate: a status page hosted on the
+VPS is unavailable exactly when it matters.

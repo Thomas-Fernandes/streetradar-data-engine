@@ -53,11 +53,22 @@ twelve-hour run and leaves room for retries.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import math
+import struct
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+from .flood import ProbedGrid
+from .tiles import TileSource
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator, Mapping
+    from pathlib import Path
+
+    from .model import ObservationBatch
+    from .store import PartWriter
     from .tiles import Bounds, Tile
 
 __all__ = [
@@ -66,10 +77,14 @@ __all__ = [
     "SWEEP_ZOOM",
     "Panorama",
     "Poster",
+    "SeenIds",
+    "SweepState",
+    "collect_mapy",
     "encode_call",
     "getbest",
     "getneighbours",
     "sweep_points",
+    "tile_of",
 ]
 
 
@@ -105,6 +120,9 @@ SWEEP_ZOOM: Final = 17
 CAPTURE_PRECISION: Final = "second"
 
 _SEARCH_RADIUS_M: Final = 150.0
+
+_MAGIC: Final = b"SRMY"
+_VERSION: Final = 1
 
 
 class Panorama(NamedTuple):
@@ -252,3 +270,280 @@ def sweep_points(bounds: Bounds, zoom: int = SWEEP_ZOOM) -> Iterator[tuple[Tile,
             lon = (x + 0.5) / span * 360.0 - 180.0
             lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 0.5) / span))))
             yield Tile(zoom, x, y), lon, lat
+
+
+class SeenIds:
+    """Which panorama ids have already been walked, as a bitmap over their range.
+
+    The previous engine kept this as a Python set serialised to
+    `visited_ids.json` — 162 MB, rewritten in full every 2,000 panoramas, roughly
+    650 GB of write amplification over the run and stalls that grew with it.
+
+    Mapy's ids are dense enough to index directly: 2,245,132 to 108,309,448 in
+    the collected quarter, 15.3% of that range occupied. A bitmap over 2^28 ids
+    is **32 MB** and answers in constant time, against about 1 GB for the same
+    thing as a set.
+    """
+
+    __slots__ = ("_bits", "_count", "capacity")
+
+    def __init__(self, capacity: int = 1 << 28) -> None:
+        if capacity < 1:
+            raise ValueError("capacity must be positive")
+        self.capacity = capacity
+        self._bits = bytearray((capacity + 7) // 8)
+        self._count = 0
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __contains__(self, pano_id: int) -> bool:
+        if not 0 <= pano_id < self.capacity:
+            # Outside the range counts as seen: it stops an id we cannot record
+            # from being walked again on every pass.
+            return True
+        return bool(self._bits[pano_id >> 3] & (1 << (pano_id & 7)))
+
+    def add(self, pano_id: int) -> bool:
+        """Record an id. Returns False when it was already recorded."""
+        if not 0 <= pano_id < self.capacity:
+            return False
+        byte, bit = pano_id >> 3, 1 << (pano_id & 7)
+        if self._bits[byte] & bit:
+            return False
+        self._bits[byte] |= bit
+        self._count += 1
+        return True
+
+
+@dataclass
+class SweepState:
+    """Everything needed to resume a Mapy run where it stopped.
+
+    One file, two bitmaps: which tiles have been asked, and which panoramas have
+    been walked. Written atomically, and — as everywhere in this engine —
+    **after** the rows it accounts for are durable, never before.
+    """
+
+    grid: ProbedGrid
+    seen: SeenIds
+    zoom: int = SWEEP_ZOOM
+    hits: int = 0
+    panoramas: int = 0
+
+    @classmethod
+    def for_bounds(cls, bounds: Bounds, zoom: int = SWEEP_ZOOM) -> SweepState:
+        source = TileSource(
+            id="mapy",
+            url_template=PANORPC_URL,
+            min_zoom=zoom,
+            max_zoom=zoom,
+            bounds=bounds,
+        )
+        return cls(grid=ProbedGrid.for_bounds(bounds, source, zoom), seen=SeenIds(), zoom=zoom)
+
+    @property
+    def swept(self) -> int:
+        return len(self.grid)
+
+    def save(self, path: Path) -> None:
+        header = json.dumps(
+            {
+                "x0": self.grid.x0,
+                "y0": self.grid.y0,
+                "width": self.grid.width,
+                "height": self.grid.height,
+                "zoom": self.zoom,
+                "hits": self.hits,
+                "panoramas": self.panoramas,
+                "swept": len(self.grid),
+                "capacity": self.seen.capacity,
+                "seen": len(self.seen),
+            }
+        ).encode()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "wb") as handle:
+            handle.write(_MAGIC)
+            handle.write(struct.pack("<BI", _VERSION, len(header)))
+            handle.write(header)
+            handle.write(self.grid._bits)  # noqa: SLF001 — same package
+            handle.write(self.seen._bits)  # noqa: SLF001
+        tmp.replace(path)
+
+    @classmethod
+    def load(cls, path: Path) -> SweepState:
+        with open(path, "rb") as handle:
+            if handle.read(4) != _MAGIC:
+                raise ValueError(f"{path} is not a Mapy sweep snapshot")
+            version, header_len = struct.unpack("<BI", handle.read(5))
+            if version != _VERSION:
+                raise ValueError(f"{path}: unsupported snapshot version {version}")
+            header = json.loads(handle.read(header_len))
+            grid = ProbedGrid(header["x0"], header["y0"], header["width"], header["height"])
+            grid._bits[:] = handle.read(len(grid._bits))  # noqa: SLF001
+            grid._count = header["swept"]  # noqa: SLF001
+            seen = SeenIds(header["capacity"])
+            seen._bits[:] = handle.read(len(seen._bits))  # noqa: SLF001
+            seen._count = header["seen"]  # noqa: SLF001
+        return cls(
+            grid=grid,
+            seen=seen,
+            zoom=header["zoom"],
+            hits=header["hits"],
+            panoramas=header["panoramas"],
+        )
+
+
+def tile_of(pano: Panorama, zoom: int) -> tuple[int, int]:
+    """Which tile a panorama's position falls in."""
+    span = 1 << zoom
+    x = int((pano.lon + 180.0) / 360.0 * span)
+    y = int((1.0 - math.asinh(math.tan(math.radians(pano.lat))) / math.pi) / 2.0 * span)
+    return max(0, min(span - 1, x)), max(0, min(span - 1, y))
+
+
+async def _walk(
+    fetcher: Poster,
+    seeds: list[Panorama],
+    state: SweepState,
+    writer: PartWriter[ObservationBatch],
+    *,
+    round_size: int,
+) -> AsyncIterator[Path]:
+    """Follow the road graph out of `seeds`, recording everything new.
+
+    Deliberately **not** bounded to the tile that produced a seed. Measured on
+    the previous engine's export, a zoom-17 tile holds 3.96 separately connected
+    fragments on average and 36 at worst, because a 197 m square cuts roads; a
+    walk confined to one would reach 44% of them. Crossing freely is what makes
+    the sweep's one seed per tile enough, and `state.seen` is what stops the
+    crossing from costing anything twice.
+
+    Parts are yielded from inside the walk, not after it. The first seed of a
+    country reaches its whole connected component — 16.2 million panoramas in the
+    previous run — and holding that in one batch before writing anything would
+    exhaust the machine long before the walk ended.
+    """
+    frontier = [p for p in seeds if state.seen.add(p.pano_id)]
+    _record(frontier, state, writer)
+
+    while frontier:
+        if writer.full():
+            part = writer.flush()
+            if part is not None:
+                yield part
+        batch = frontier[:round_size]
+        frontier = frontier[round_size:]
+        answers = await asyncio.gather(
+            *(getneighbours(fetcher, p.pano_id) for p in batch), return_exceptions=True
+        )
+        found: list[Panorama] = []
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                # One failed expansion loses a branch, not the run. The tile is
+                # already recorded as swept, so a retry belongs to the next pass.
+                continue
+            found.extend(p for p in answer if state.seen.add(p.pano_id))
+        _record(found, state, writer)
+        frontier.extend(found)
+
+
+def _record(
+    panoramas: list[Panorama], state: SweepState, writer: PartWriter[ObservationBatch]
+) -> None:
+    """Group by tile and hand to the batch, which takes one tile at a time."""
+    if not panoramas:
+        return
+    by_tile: dict[tuple[int, int], list[Panorama]] = {}
+    for pano in panoramas:
+        by_tile.setdefault(tile_of(pano, state.zoom), []).append(pano)
+    for (x, y), group in by_tile.items():
+        writer.batch.add(
+            tile_x=x,
+            tile_y=y,
+            pano_id=[p.pano_id for p in group],
+            lon=[p.lon for p in group],
+            lat=[p.lat for p in group],
+            captured_at=[p.captured_at for p in group],
+            coverage_type=[p.provider for p in group],
+        )
+    state.panoramas += len(panoramas)
+
+
+async def collect_mapy(
+    fetcher: Poster,
+    bounds: Bounds,
+    *,
+    writer: PartWriter[ObservationBatch],
+    state: SweepState,
+    round_size: int = 256,
+    limit: int | None = None,
+) -> AsyncIterator[Path]:
+    """Sweep the tile grid, walk out of every hit, and yield each finished part.
+
+    The same generator shape as the other collectors, so the ordering rule reads
+    the same way — upload the part, then snapshot:
+
+        async for part in collect_mapy(fetcher, bounds, writer=writer, state=state):
+            upload(part)
+            part.unlink()
+            state.save(snapshot)
+
+    Nothing here saves `state`: only the caller knows when the rows became
+    durable, and snapshotting first is what turns a crash into tiles marked swept
+    whose panoramas were never written.
+
+    `limit` caps the number of *tiles swept*, which is what makes a bounded first
+    run bounded. The walk that each tile triggers is not capped, because stopping
+    mid-walk would leave `seen` claiming panoramas that were never recorded.
+    """
+    if writer.batch.capture_precision != CAPTURE_PRECISION:
+        raise ValueError(
+            f"writer records {writer.batch.capture_precision!r} precision; Mapy "
+            f"reports a full timestamp, so it must be {CAPTURE_PRECISION!r}"
+        )
+
+    swept = 0
+    pending: list[tuple[Tile, float, float]] = []
+
+    async def drain() -> AsyncIterator[Path]:
+        nonlocal pending
+        if not pending:
+            return
+        found = await asyncio.gather(
+            *(getbest(fetcher, lon, lat) for _, lon, lat in pending), return_exceptions=True
+        )
+        seeds: list[Panorama] = []
+        for (tile, _, _), answer in zip(pending, found, strict=True):
+            if isinstance(answer, BaseException):
+                continue
+            state.grid.add(tile)
+            if answer is not None and answer.has_position:
+                state.hits += 1
+                seeds.append(answer)
+        pending = []
+        if seeds:
+            async for part in _walk(fetcher, seeds, state, writer, round_size=round_size):
+                yield part
+        if writer.full():
+            filled = writer.flush()
+            if filled is not None:
+                yield filled
+
+    for tile, lon, lat in sweep_points(bounds, state.zoom):
+        if tile in state.grid:
+            continue
+        if limit is not None and swept >= limit:
+            break
+        pending.append((tile, lon, lat))
+        swept += 1
+        if len(pending) >= round_size:
+            async for part in drain():
+                yield part
+
+    async for part in drain():
+        yield part
+
+    remainder = writer.flush()
+    if remainder is not None:
+        yield remainder

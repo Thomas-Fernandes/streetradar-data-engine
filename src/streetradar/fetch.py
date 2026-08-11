@@ -245,6 +245,16 @@ class Fetcher:
         """
         return await self.get(url, missing_ok=True, headers=dict(headers))
 
+    async def post(self, url: str, body: bytes, *, headers: Mapping[str, str]) -> bytes:
+        """POST a body and return the response.
+
+        Here because Mapy speaks FRPC — a binary RPC over HTTP POST — and the
+        alternative was letting `pyfrpc` own its own session, which would put one
+        provider outside the budget, the retries and the metrics that every other
+        request passes through. The codec stays upstream's; the request is ours.
+        """
+        return await self._request("POST", url, data=body, headers=dict(headers))
+
     @asynccontextmanager
     async def guard(self) -> AsyncIterator[None]:
         """Apply the budget and concurrency ceiling to a call we do not issue."""

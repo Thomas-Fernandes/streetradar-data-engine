@@ -29,6 +29,10 @@ dependencies = [
     # load on a runtime older than the protoc that produced them.
     "protobuf==6.33.6",
     "pyarrow==23.0.1",
+    # Mapy speaks FRPC, a binary RPC over HTTP POST. Only the codec is used —
+    # `pyfrpc.encode`/`decode` — never its FrpcClient, which would carry its own
+    # requests session outside the budget and metrics. See ADR 0015.
+    "pyfrpc==0.2.13",
     "python-dotenv==1.2.2",
 ]
 
@@ -166,7 +170,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*"]
+module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*", "pyfrpc.*"]
 ignore_missing_imports = true
 
 # protoc writes `**kwargs: _Optional[_Mapping]` in the stubs it generates, which

@@ -136,11 +136,12 @@ class TileSource:
     def headers(self, tile: Tile) -> dict[str, str]:
         return {k: v.format(z=tile.z, x=tile.x, y=tile.y) for k, v in self.header_template.items()}
 
-    def tiles_at(self, zoom: int) -> Iterator[Tile]:
-        """Every tile of `bounds` at `zoom`, row-major.
+    def tile_range(self, zoom: int) -> tuple[int, int, int, int]:
+        """The half-open tile box `bounds` covers at `zoom`, as (x0, y0, x1, y1).
 
-        Yields lazily: a country at z14 is ~10^5 tiles and there is no reason to
-        hold them all in memory.
+        Clamped to the world. Public because a caller that wants a *subset* of
+        the box — a sampled lattice, a shard — must not have to enumerate it
+        first: Australia at zoom 17 is on the order of 10^8 tiles.
         """
         self._check_zoom(zoom)
         west, south, east, north = self.bounds
@@ -149,22 +150,23 @@ class TileSource:
         # `1 << zoom` rather than `2**zoom`: int ** int widens to Any under
         # mypy strict, and the tile span is an integer count.
         span = 1 << zoom
-        for x in range(max(0, x0), min(span - 1, x1) + 1):
-            for y in range(max(0, y0), min(span - 1, y1) + 1):
+        return max(0, x0), max(0, y0), min(span - 1, x1) + 1, min(span - 1, y1) + 1
+
+    def tiles_at(self, zoom: int) -> Iterator[Tile]:
+        """Every tile of `bounds` at `zoom`, row-major.
+
+        Yields lazily: a country at z14 is ~10^5 tiles and there is no reason to
+        hold them all in memory.
+        """
+        x0, y0, x1, y1 = self.tile_range(zoom)
+        for x in range(x0, x1):
+            for y in range(y0, y1):
                 yield Tile(zoom, x, y)
 
     def tile_count_at(self, zoom: int) -> int:
         """How many tiles a flat sweep at `zoom` would request."""
-        self._check_zoom(zoom)
-        west, south, east, north = self.bounds
-        x0, y0 = _deg2num(north, west, zoom)
-        x1, y1 = _deg2num(south, east, zoom)
-        # `1 << zoom` rather than `2**zoom`: int ** int widens to Any under
-        # mypy strict, and the tile span is an integer count.
-        span = 1 << zoom
-        nx = min(span - 1, x1) - max(0, x0) + 1
-        ny = min(span - 1, y1) - max(0, y0) + 1
-        return max(0, nx) * max(0, ny)
+        x0, y0, x1, y1 = self.tile_range(zoom)
+        return max(0, x1 - x0) * max(0, y1 - y0)
 
     def _check_zoom(self, zoom: int) -> None:
         if not self.min_zoom <= zoom <= self.max_zoom:

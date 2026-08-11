@@ -48,6 +48,7 @@ __all__ = [
     "TILE_ZOOM",
     "coverage_raster_url",
     "getpanos",
+    "chain_graph",
     "links_to_edges",
     "has_coverage",
     "parse_tile",
@@ -184,3 +185,57 @@ def links_to_edges(panos: Sequence[Panorama]) -> set[tuple[str, str]]:
                 other = panos[index]
                 edges.add((pano.id, other.id) if pano.id < other.id else (other.id, pano.id))
     return edges
+
+
+def chain_graph(panos: Sequence[Panorama]) -> list[list[tuple[float, float]]]:
+    """Chain a tile's road graph into polylines — the coverage lines.
+
+    A drive is a run of panoramas each linked to the next; a junction is where
+    three or more roads meet. So the graph is cut into maximal paths whose
+    interior nodes have exactly two neighbours, breaking at endpoints and
+    junctions — the same shape a road network has. Returns each polyline as
+    (lon, lat) points.
+
+    Cross-tile links (indices past the tile) are absent, so a road leaving the
+    tile simply ends at the edge; the neighbouring tile carries its continuation,
+    and the two meet at the shared edge panorama, so the rendered lines join even
+    though each tile is chained on its own. Pure closed loops with no junction are
+    walked once from their lowest index so the output is deterministic.
+    """
+    n = len(panos)
+    adjacency: list[set[int]] = [set() for _ in range(n)]
+    for i, pano in enumerate(panos):
+        for j in pano.links:
+            if 0 <= j < n and j != i:
+                adjacency[i].add(j)
+                adjacency[j].add(i)
+
+    used: set[frozenset[int]] = set()
+
+    def walk(start: int, second: int) -> list[int]:
+        path = [start, second]
+        used.add(frozenset((start, second)))
+        prev, current = start, second
+        while len(adjacency[current]) == 2:
+            nxt = next((k for k in adjacency[current] if k != prev), None)
+            if nxt is None or frozenset((current, nxt)) in used:
+                break
+            used.add(frozenset((current, nxt)))
+            path.append(nxt)
+            prev, current = current, nxt
+        return path
+
+    paths: list[list[int]] = []
+    # Start every path at an endpoint or junction, so interiors stay degree-2.
+    for i in range(n):
+        if len(adjacency[i]) != 2:
+            for j in sorted(adjacency[i]):
+                if frozenset((i, j)) not in used:
+                    paths.append(walk(i, j))
+    # Whatever edges remain lie on pure cycles with no junction.
+    for i in range(n):
+        for j in sorted(adjacency[i]):
+            if frozenset((i, j)) not in used:
+                paths.append(walk(i, j))
+
+    return [[(panos[k].lon, panos[k].lat) for k in path] for path in paths]

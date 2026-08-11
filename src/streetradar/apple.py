@@ -43,19 +43,28 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Final, NamedTuple
 
-from .tiles import Bounds, Tile, TileSource, offset_to_wgs84
+from .flood import FloodState, ProbedGrid, exits_from_points, harvest_flood
+from .tiles import Bounds, Tile, TileFetcher, TileSource, offset_to_wgs84
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Collection, Iterable
+    from pathlib import Path
+
+    from .flood import Direction
     from .model import CapturePrecision
+    from .store import PartWriter
 
 __all__ = [
     "APPLE_ZOOM",
+    "CAPTURE_PRECISION",
     "COVERAGE_TILE_URL",
     "COVERAGE_TYPES",
     "CoverageTile",
     "TokenMissing",
     "apple_source",
+    "collect_coverage",
     "decode_coverage_tile",
+    "flood_state",
 ]
 
 #: Apple serves coverage at one zoom and rejects every other. This is why the
@@ -171,6 +180,112 @@ def decode_coverage_tile(body: bytes | None, tile: Tile) -> CoverageTile:
         coverage_type=tuple(coverage_type),
         build_id=tuple(build_id),
     )
+
+
+def flood_state(source: TileSource) -> FloodState:
+    """A fresh resume point covering everything `source` bounds, at Apple's zoom."""
+    return FloodState(
+        grid=ProbedGrid.for_bounds(source.bounds, source, APPLE_ZOOM), zoom=APPLE_ZOOM
+    )
+
+
+class _DecodeOnce:
+    """Decodes each tile once, for two callers that both need the result.
+
+    `harvest_flood` asks for a tile's exits before yielding it, and the collector
+    then wants the same tile's panoramas. Decoding in both places would halve
+    throughput — 2,544 tiles/s becomes 1,272, below what the fetcher can supply —
+    so the exit callback decodes and the collector takes the result.
+
+    At most one tile is held: `harvest_flood` yields each result immediately
+    after asking for its exits, and `take` removes it.
+    """
+
+    __slots__ = ("_pending",)
+
+    def __init__(self) -> None:
+        self._pending: dict[Tile, CoverageTile] = {}
+
+    def exits(self, body: bytes, tile: Tile) -> Collection[Direction]:
+        decoded = decode_coverage_tile(body, tile)
+        self._pending[tile] = decoded
+        return exits_from_points(zip(decoded.lon, decoded.lat, strict=True), tile)
+
+    def take(self, tile: Tile) -> CoverageTile | None:
+        """The decoded tile, or None when it held no coverage."""
+        return self._pending.pop(tile, None)
+
+
+async def collect_coverage(
+    fetcher: TileFetcher,
+    source: TileSource,
+    *,
+    seeds: Iterable[Tile],
+    writer: PartWriter,
+    state: FloodState,
+    limit: int | None = None,
+) -> AsyncIterator[Path]:
+    """Flood outwards from `seeds`, writing what is found. Yields each finished part.
+
+    The generator shape is the ordering rule from `streetradar.store` made into
+    the caller's natural code:
+
+        async for part in collect_coverage(..., writer=writer, state=state):
+            upload(part)
+            part.unlink()
+            state.save(snapshot)
+
+    Upload first, snapshot second. Snapshotting first is what turns a crash into
+    silently missing rows — tiles marked probed whose panoramas were never
+    durable — which is the failure the previous engine had. Nothing here saves
+    `state`, deliberately: only the caller knows when the rows became durable.
+
+    `state` is required rather than defaulted: a country takes days, so where the
+    resume point lives is not a decision to make implicitly. Build one with
+    `flood_state(source)`, or load a snapshot with `FloodState.load`. It is
+    mutated as the flood advances, so the object passed in is the one to
+    snapshot.
+
+    Requests are counted by `limit`, not tiles written; `writer.rows_written`,
+    `state.hits` and `state.probed` carry the rest of the tally.
+    """
+    if writer.batch.capture_precision != CAPTURE_PRECISION:
+        raise ValueError(
+            f"writer records {writer.batch.capture_precision!r} precision; Apple "
+            f"reports a full UTC timestamp, so it must be {CAPTURE_PRECISION!r}"
+        )
+
+    decoder = _DecodeOnce()
+    async for result in harvest_flood(
+        fetcher,
+        source,
+        APPLE_ZOOM,
+        seeds=seeds,
+        exits=decoder.exits,
+        state=state,
+        limit=limit,
+    ):
+        decoded = decoder.take(result.tile)
+        if decoded is None or not len(decoded):
+            continue
+        writer.batch.add(
+            tile_x=result.tile.x,
+            tile_y=result.tile.y,
+            pano_id=decoded.pano_id,
+            lon=decoded.lon,
+            lat=decoded.lat,
+            captured_at=decoded.captured_at,
+            coverage_type=decoded.coverage_type,
+            build_id=decoded.build_id,
+        )
+        if writer.full():
+            part = writer.flush()
+            if part is not None:
+                yield part
+
+    part = writer.flush()
+    if part is not None:
+        yield part
 
 
 def apple_source(bounds: Bounds, *, token: str | None = None) -> TileSource:

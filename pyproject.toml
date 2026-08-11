@@ -23,6 +23,12 @@ dependencies = [
     "aiohttp==3.14.3",
     "boto3==1.40.0",
     "mapbox-vector-tile==2.2.0",
+    # The orchestrator (ADR 0003): flows, schedules, retries, the served runner.
+    # Pinned exactly like everything else, and with one extra reason: the
+    # server migrates its SQLite schema on upgrade, so a floating version would
+    # let a routine lockfile refresh migrate the production database as a side
+    # effect.
+    "prefect==3.8.2",
     # Arrives transitively through mapbox-vector-tile, but `streetradar.apple`
     # imports it directly for Apple's coverage schema, so it is declared. The
     # pin has a floor as well as a ceiling: generated `_pb2` modules refuse to

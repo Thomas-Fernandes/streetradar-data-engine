@@ -36,6 +36,10 @@ dependencies = [
     "python-dotenv==1.2.2",
 ]
 
+[project.scripts]
+# One (provider, scope) run by hand — the same unit the orchestrator schedules.
+streetradar = "streetradar.__main__:main"
+
 [project.optional-dependencies]
 # NOTE (rebuild): this extra still describes what the *archived* engine needed.
 # It is left intact so `archive/` stays runnable as a reference oracle, and will

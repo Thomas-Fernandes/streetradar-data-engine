@@ -170,7 +170,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*", "pyfrpc.*"]
+module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*", "pyfrpc.*", "boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 # protoc writes `**kwargs: _Optional[_Mapping]` in the stubs it generates, which

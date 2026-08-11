@@ -1,0 +1,74 @@
+# The engine stack: identical on every machine that runs it (ADR 0018).
+#
+# Two services from one image. `prefect-server` holds state and the UI (bound to
+# localhost only — reach it over SSH from anywhere else); `runner` serves the
+# deployments and executes flow runs. Moving the stack to another machine is
+# copying `.env` plus the two named volumes and running `compose up` there.
+#
+# The container boundary is the environment boundary: ENGINE_ALLOW_OUTBOUND=1
+# exists only inside the runner service. A shell on the host — including the one
+# this repo is developed in — keeps the default 0 and cannot emit provider
+# traffic.
+
+name: streetradar
+
+x-engine: &engine
+  image: ghcr.io/thomas-fernandes/streetradar-data-engine:stable
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  init: true
+  restart: unless-stopped
+
+services:
+  prefect-server:
+    <<: *engine
+    command: prefect server start --host 0.0.0.0 --port 4200
+    environment:
+      PREFECT_HOME: /prefect
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    ports:
+      # Localhost only. The UI is never exposed to the network; on a remote
+      # machine, tunnel it: ssh -L 4200:127.0.0.1:4200 <host>
+      - "127.0.0.1:4200:4200"
+    volumes:
+      - prefect-home:/prefect
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=5)
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
+
+  runner:
+    <<: *engine
+    command: python -m streetradar.flows
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_HOME: /tmp/prefect-runner
+      # The one place this is ever set (ADR 0018). Provider traffic leaves from
+      # this container and nowhere else.
+      ENGINE_ALLOW_OUTBOUND: "1"
+      STREETRADAR_DATA_DIR: /data
+    env_file:
+      # Secrets: ENGINE_R2_*, ENGINE_DISCORD_WEBHOOK, provider tokens.
+      # Optional so the stack comes up without credentials; a flow that needs
+      # them reports which variable is missing, by name.
+      - path: .env
+        required: false
+    volumes:
+      - streetradar-data:/data
+
+volumes:
+  # Prefect's SQLite (run history, deployments) and the engine's working set
+  # (parquet parts, resume snapshots). These two volumes plus .env ARE the
+  # stack's state — back them up, and copy them to move machines.
+  prefect-home:
+  streetradar-data:

@@ -1,0 +1,18 @@
+# Keep the build context tiny and secret-free. The image needs pyproject,
+# uv.lock and src/ (tests/ stays in the context for the CI test stage); the
+# rest is either weight (archive/ is the old engine, data/ can be 20 GB) or
+# must never reach a layer (.env).
+.git/
+.github/
+.venv/
+archive/
+data/
+docs/
+.env
+*.env
+**/__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.log
+.playwright-mcp/

@@ -23,6 +23,7 @@ dependencies = [
     "aiohttp==3.14.3",
     "boto3==1.40.0",
     "mapbox-vector-tile==2.2.0",
+    "pyarrow==23.0.1",
     "python-dotenv==1.2.2",
 ]
 
@@ -140,5 +141,5 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*"]
+module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*"]
 ignore_missing_imports = true

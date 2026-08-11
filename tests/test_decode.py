@@ -16,11 +16,10 @@ import pytest
 
 from streetradar.decode import (
     _clip_to_tile,
-    _to_wgs84,
     decode_tile,
     geodesic_length_m,
 )
-from streetradar.tiles import Tile
+from streetradar.tiles import Tile, offset_to_wgs84
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "ja360-z14-7195-4355.pbf"
 REYKJAVIK_TILE = Tile(14, 7195, 4355)
@@ -51,24 +50,24 @@ class TestAxisAndProjection:
         # y = extent - y. Getting this backwards mirrors every road about the
         # tile's horizontal centre line, which looks plausible and is wrong.
         _, south, _, north = REYKJAVIK_TILE.bounds
-        _, lat_at_y0 = _to_wgs84(0.0, 0.0, REYKJAVIK_TILE, EXTENT)
-        _, lat_at_top = _to_wgs84(0.0, float(EXTENT), REYKJAVIK_TILE, EXTENT)
+        _, lat_at_y0 = offset_to_wgs84(REYKJAVIK_TILE, 0.0, 0.0, EXTENT)
+        _, lat_at_top = offset_to_wgs84(REYKJAVIK_TILE, 0.0, float(EXTENT), EXTENT)
         assert lat_at_y0 == pytest.approx(south, abs=1e-9)
         assert lat_at_top == pytest.approx(north, abs=1e-9)
         assert lat_at_top > lat_at_y0
 
     def test_tile_corners_map_to_tile_bounds(self) -> None:
         west, south, east, north = REYKJAVIK_TILE.bounds
-        assert _to_wgs84(0.0, 0.0, REYKJAVIK_TILE, EXTENT) == pytest.approx((west, south))
-        assert _to_wgs84(float(EXTENT), float(EXTENT), REYKJAVIK_TILE, EXTENT) == pytest.approx(
-            (east, north)
-        )
+        assert offset_to_wgs84(REYKJAVIK_TILE, 0.0, 0.0, EXTENT) == pytest.approx((west, south))
+        assert offset_to_wgs84(
+            REYKJAVIK_TILE, float(EXTENT), float(EXTENT), EXTENT
+        ) == pytest.approx((east, north))
 
     def test_latitude_is_not_linear_within_the_tile(self) -> None:
         # A tile spans equal Web Mercator, not equal degrees. Linear
         # interpolation is the tempting shortcut and it is measurably wrong.
         _, south, _, north = REYKJAVIK_TILE.bounds
-        _, lat_mid = _to_wgs84(0.0, EXTENT / 2.0, REYKJAVIK_TILE, EXTENT)
+        _, lat_mid = offset_to_wgs84(REYKJAVIK_TILE, 0.0, EXTENT / 2.0, EXTENT)
         linear_mid = (south + north) / 2.0
         assert lat_mid != pytest.approx(linear_mid, abs=1e-9)
         # At 64°N the shortcut's error is small but far from negligible: it is
@@ -78,7 +77,7 @@ class TestAxisAndProjection:
 
     def test_longitude_is_linear_within_the_tile(self) -> None:
         west, _, east, _ = REYKJAVIK_TILE.bounds
-        lon_mid, _ = _to_wgs84(EXTENT / 2.0, 0.0, REYKJAVIK_TILE, EXTENT)
+        lon_mid, _ = offset_to_wgs84(REYKJAVIK_TILE, EXTENT / 2.0, 0.0, EXTENT)
         assert lon_mid == pytest.approx((west + east) / 2.0)
 
 

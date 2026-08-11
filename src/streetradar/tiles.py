@@ -308,6 +308,25 @@ def _intersects(tile: Tile, bounds: Bounds) -> bool:
     return not (t_east <= west or t_west >= east or t_north <= south or t_south >= north)
 
 
+def offset_to_wgs84(tile: Tile, x: float, y: float, extent: float) -> tuple[float, float]:
+    """A position inside a tile, as (lon, lat).
+
+    `extent` is the tile's own coordinate grid and `y` points north, so the
+    Mercator formula — which wants it pointing south — gets `extent - y`.
+
+    Shared because two providers need it from different wire formats: MVT gives
+    tile-local integers over an extent of 4096, and Apple gives sixty-fourths of
+    a pixel over an extent of 255. Only the numbers differ; both are slippy-map
+    tiles, and getting the latitude wrong is the same mistake in both.
+    """
+    span = float(1 << tile.z) * extent
+    world_x = (tile.x * extent + x) / span
+    world_y = (tile.y * extent + (extent - y)) / span
+    lon = world_x * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * world_y))))
+    return (lon, lat)
+
+
 def _deg2num(lat: float, lon: float, zoom: int) -> tuple[int, int]:
     n = 2.0**zoom
     x = int((lon + 180.0) / 360.0 * n)

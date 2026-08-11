@@ -1700,6 +1700,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
     { name = "mapbox-vector-tile" },
+    { name = "protobuf" },
     { name = "pyarrow" },
     { name = "python-dotenv" },
 ]
@@ -1737,6 +1738,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "types-protobuf" },
 ]
 
 [package.metadata]
@@ -1754,6 +1756,7 @@ requires-dist = [
     { name = "osmium", marker = "extra == 'providers'", specifier = "==4.1.1" },
     { name = "pandas", marker = "extra == 'providers'", specifier = "==2.3.1" },
     { name = "pillow", marker = "extra == 'providers'", specifier = "==12.3.0" },
+    { name = "protobuf", specifier = "==6.33.6" },
     { name = "psutil", marker = "extra == 'providers'", specifier = "==7.0.0" },
     { name = "pyarrow", specifier = "==23.0.1" },
     { name = "pyarrow", marker = "extra == 'providers'", specifier = "==23.0.1" },
@@ -1777,6 +1780,7 @@ dev = [
     { name = "pytest", specifier = ">=8.4" },
     { name = "pytest-asyncio", specifier = ">=1.0" },
     { name = "ruff", specifier = "==0.16.2" },
+    { name = "types-protobuf", specifier = ">=6.30" },
 ]
 
 [[package]]
@@ -1858,6 +1862,15 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:1a3a35229fdc13446b4eab50e7fcf9399ff941e89a3b761497786297a5d8dde5", upload-time = "2026-07-08T19:32:16Z" },
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:8e109528e6bab044815daebaf71770fbaace3a66ef1c816cb55c875350f78a60", upload-time = "2026-07-08T19:32:30Z" },
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:222a6681467cc7f6f05cd3068dfbc603def3a1e46d1d4620c1c8cdf6178bd563", upload-time = "2026-07-08T19:32:44Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.34.1.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/59/e2b13b499d15e6720150c4b1a8d91e31fcacf716b432397475b3151ff7e4/types_protobuf-7.34.1.20260518.tar.gz", hash = "sha256:28cfaded25889cb83ebfb63cfb0a43628f0b6f3785767bec17287dc6468795f2", size = 68936, upload-time = "2026-05-18T06:01:47.332Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/1f/ec5caf72c2e3b688ca3927e0979a04ddad19e1afc4bf1c199bd743e0f419/types_protobuf-7.34.1.20260518-py3-none-any.whl", hash = "sha256:a0a5337413347166439c0e07cbc26c6164d091401c6f01b1dfd8cdb966c4dd8f", size = 85992, upload-time = "2026-05-18T06:01:45.696Z" },
 ]
 
 [[package]]

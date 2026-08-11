@@ -27,7 +27,7 @@ import math
 from collections.abc import Iterator, Sequence
 from typing import Any, NamedTuple
 
-from .tiles import Tile
+from .tiles import Tile, offset_to_wgs84
 
 __all__ = [
     "DecodedTile",
@@ -109,7 +109,7 @@ def decode_tile(
             for piece in _clip_to_tile(ring, extent) if clip else (ring,):
                 if len(piece) < 2:
                     continue
-                coords = tuple(_to_wgs84(x, y, tile, extent) for x, y in piece)
+                coords = tuple(offset_to_wgs84(tile, x, y, extent) for x, y in piece)
                 lines.append(Line(coords=coords, properties=properties))
 
     return DecodedTile(tile=tile, layer=layer, extent=extent, lines=tuple(lines))
@@ -142,20 +142,6 @@ def _rings(geometry: dict[str, Any]) -> Iterator[list[tuple[float, float]]]:
     elif kind == "MultiLineString":
         for ring in coordinates:
             yield [(float(x), float(y)) for x, y in ring]
-
-
-def _to_wgs84(x: float, y: float, tile: Tile, extent: int) -> tuple[float, float]:
-    """Tile-local (x, y) to (lon, lat).
-
-    Decoded y points north, the Mercator formula wants it pointing south, hence
-    the `extent - y`.
-    """
-    span = float(1 << tile.z) * extent
-    world_x = (tile.x * extent + x) / span
-    world_y = (tile.y * extent + (extent - y)) / span
-    lon = world_x * 360.0 - 180.0
-    lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * world_y))))
-    return (lon, lat)
 
 
 def _clip_to_tile(

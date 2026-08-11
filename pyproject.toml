@@ -23,6 +23,11 @@ dependencies = [
     "aiohttp==3.14.3",
     "boto3==1.40.0",
     "mapbox-vector-tile==2.2.0",
+    # Arrives transitively through mapbox-vector-tile, but `streetradar.apple`
+    # imports it directly for Apple's coverage schema, so it is declared. The
+    # pin has a floor as well as a ceiling: generated `_pb2` modules refuse to
+    # load on a runtime older than the protoc that produced them.
+    "protobuf==6.33.6",
     "pyarrow==23.0.1",
     "python-dotenv==1.2.2",
 ]
@@ -32,8 +37,11 @@ dependencies = [
 # It is left intact so `archive/` stays runnable as a reference oracle, and will
 # be rebuilt as the new core lands. Three of these are already slated to go —
 # pycairo (replaced by tippecanoe), pyexiv2 (no EXIF is ever read) and geopandas
-# (replaced by shapely + DuckDB spatial) — and torchvision must be added for
-# streetlevel.lookaround to import at all. See docs/ARCHITECTURE.md §0.
+# (replaced by shapely + DuckDB spatial). streetlevel and torch are on their way
+# out too: Apple's schema is vendored (ADR 0014), so nothing in src/ imports the
+# library, and it is kept here only as the oracle the Apple decoder is tested
+# against and for archive/. torchvision was never needed — the guard in
+# streetlevel.lookaround tests torch, so without torch the import succeeds.
 #
 # Versions are pinned because GeoPandas, Shapely and DuckDB break their APIs
 # across majors, and an unpinned requirements.txt is what made the pipeline
@@ -70,7 +78,15 @@ providers = [
 # ruff and mypy are pinned exactly. CI blocks on zero mypy errors under
 # `strict`, and a floating version would turn an upstream release into a
 # surprise red build on an unrelated PR.
-dev = ["ruff==0.16.2", "mypy==2.3.0", "pytest>=8.4", "pytest-asyncio>=1.0"]
+dev = ["ruff==0.16.2", "mypy==2.3.0", "pytest>=8.4", "pytest-asyncio>=1.0",
+       # Stubs for the google.protobuf imports in the generated Apple schema.
+       "types-protobuf>=6.30"]
+
+# `grpcio-tools` is deliberately NOT here. It is only needed to regenerate
+# `src/streetradar/proto/apple_coverage_pb2.py{,i}`, which happens when Apple
+# changes its format — not on any ordinary run — and its wheels do not cover
+# every Python this project claims to support, so it would constrain the
+# resolution of everyone else. The command is in the .proto header.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -105,7 +121,10 @@ target-version = "py312"
 # and the snippets there are illustrative: deliberately column-aligned to show
 # which layer owns which call, and sometimes referencing names that do not exist
 # yet. Formatting them destroys the alignment that is the point of the example.
-extend-exclude = ["archive", "data", "docs"]
+#
+# The generated protobuf module is machine output: reformatting it would make
+# every regeneration a diff, and it is not ours to style.
+extend-exclude = ["archive", "data", "docs", "src/streetradar/proto/apple_coverage_pb2.py*"]
 
 [tool.ruff.lint]
 select = [
@@ -126,6 +145,12 @@ ignore = [
 python_version = "3.12"
 files = ["src", "tests"]
 mypy_path = "src"
+# The generated protobuf module, and only that file. Its *interface* is still
+# fully checked: protoc emits `apple_coverage_pb2.pyi` alongside it, mypy
+# prefers the stub, and every call in `streetradar.apple` is typed against it.
+# This excludes machine output from being style-checked, not our code from
+# being type-checked.
+exclude = ["src/streetradar/proto/apple_coverage_pb2\\.py$"]
 
 # Strict from the first commit of the rebuild, with a zero-error baseline.
 #
@@ -143,3 +168,11 @@ warn_redundant_casts = true
 [[tool.mypy.overrides]]
 module = ["streetlevel.*", "osmium.*", "shapely.*", "pyproj.*", "duckdb.*", "mapbox_vector_tile.*", "pyarrow.*"]
 ignore_missing_imports = true
+
+# protoc writes `**kwargs: _Optional[_Mapping]` in the stubs it generates, which
+# `strict` counts as a missing type argument. One error code, in one generated
+# module, and NOT `ignore_errors`: everything else about the stub is still
+# checked, which is the whole reason for generating it.
+[[tool.mypy.overrides]]
+module = ["streetradar.proto.*"]
+disable_error_code = ["type-arg"]

@@ -23,6 +23,7 @@ from streetradar.apple import (
     flood_state,
 )
 from streetradar.flood import FloodState
+from streetradar.model import ObservationBatch
 from streetradar.proto import apple_coverage_pb2 as pb
 from streetradar.store import PartWriter
 from streetradar.tiles import Tile, TileSource
@@ -87,18 +88,16 @@ class StubFetcher:
         return self._covered.get(tile)
 
 
-def writer_at(directory: Path, *, rows_per_part: int = 20_000_000) -> PartWriter:
+def writer_at(directory: Path, *, rows_per_part: int = 20_000_000) -> PartWriter[ObservationBatch]:
     return PartWriter(
         directory,
-        provider="apple",
-        run_id="test",
-        capture_precision=CAPTURE_PRECISION,
+        ObservationBatch(provider="apple", run_id="test", capture_precision=CAPTURE_PRECISION),
         rows_per_part=rows_per_part,
     )
 
 
 async def collect(
-    covered: Mapping[Tile, bytes], writer: PartWriter, seed: Tile
+    covered: Mapping[Tile, bytes], writer: PartWriter[ObservationBatch], seed: Tile
 ) -> tuple[list[Path], StubFetcher, FloodState]:
     fetcher = StubFetcher(covered)
     src = source()
@@ -217,7 +216,10 @@ class TestOrderingRule:
     async def test_a_writer_of_the_wrong_precision_is_refused(self, tmp_path: Path) -> None:
         # Apple reports a full UTC timestamp; recording it as month precision
         # would make the front end under-claim on every Apple panorama.
-        writer = PartWriter(tmp_path, provider="apple", run_id="test", capture_precision="month")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="test", capture_precision="month"),
+        )
         seed = Tile(APPLE_ZOOM, 67756, 44565)
         with pytest.raises(ValueError, match="must be 'second'"):
             await collect({seed: body(seed, [(0.5, 0.5)])}, writer, seed)

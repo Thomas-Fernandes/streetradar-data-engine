@@ -151,7 +151,10 @@ class TestObservationBatch:
 
 class TestPartWriter:
     def test_writes_a_part_and_reports_its_path(self, tmp_path: Path) -> None:
-        writer = PartWriter(tmp_path, provider="apple", run_id="r1", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+        )
         writer.batch.add(
             tile_x=1,
             tile_y=1,
@@ -165,12 +168,18 @@ class TestPartWriter:
         assert pq.ParquetFile(path).metadata.num_rows == 2
 
     def test_flushing_nothing_writes_nothing(self, tmp_path: Path) -> None:
-        writer = PartWriter(tmp_path, provider="apple", run_id="r1", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+        )
         assert writer.flush() is None
         assert list(tmp_path.iterdir()) == []
 
     def test_parts_are_numbered_and_immutable(self, tmp_path: Path) -> None:
-        writer = PartWriter(tmp_path, provider="apple", run_id="r1", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+        )
         paths = []
         for i in range(3):
             writer.batch.add(
@@ -184,13 +193,19 @@ class TestPartWriter:
     def test_no_temporary_file_survives_a_write(self, tmp_path: Path) -> None:
         # A part is written to .tmp and renamed, so a crash mid-write leaves
         # something nothing references rather than a truncated part.
-        writer = PartWriter(tmp_path, provider="apple", run_id="r1", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+        )
         writer.batch.add(tile_x=0, tile_y=0, pano_id=[1], lon=[0.0], lat=[0.0], captured_at=[None])
         writer.flush()
         assert not list(tmp_path.glob("*.tmp"))
 
     def test_pending_reports_what_a_crash_would_lose(self, tmp_path: Path) -> None:
-        writer = PartWriter(tmp_path, provider="apple", run_id="r1", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+        )
         assert writer.pending == 0
         writer.batch.add(
             tile_x=0,
@@ -206,7 +221,9 @@ class TestPartWriter:
 
     def test_full_reports_when_a_part_is_due(self, tmp_path: Path) -> None:
         writer = PartWriter(
-            tmp_path, provider="apple", run_id="r1", capture_precision="second", rows_per_part=2
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r1", capture_precision="second"),
+            rows_per_part=2,
         )
         assert not writer.full()
         writer.batch.add(
@@ -222,7 +239,9 @@ class TestPartWriter:
     def test_a_zero_size_part_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="rows_per_part must be positive"):
             PartWriter(
-                tmp_path, provider="a", run_id="r", capture_precision="second", rows_per_part=0
+                tmp_path,
+                ObservationBatch(provider="a", run_id="r", capture_precision="second"),
+                rows_per_part=0,
             )
 
     def test_parts_are_written_with_zstd(self, tmp_path: Path) -> None:

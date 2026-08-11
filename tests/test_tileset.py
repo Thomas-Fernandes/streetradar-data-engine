@@ -133,7 +133,10 @@ class TestFeatureStream:
 
 class TestReadParts:
     def test_reads_parts_in_order_and_only_what_tiling_needs(self, tmp_path: Path) -> None:
-        writer = PartWriter(tmp_path, provider="apple", run_id="r", capture_precision="second")
+        writer = PartWriter(
+            tmp_path,
+            ObservationBatch(provider="apple", run_id="r", capture_precision="second"),
+        )
         for i in range(3):
             writer.batch.add(
                 tile_x=i, tile_y=0, pano_id=[i], lon=[6.0], lat=[49.6], captured_at=[ms(2021, 1)]

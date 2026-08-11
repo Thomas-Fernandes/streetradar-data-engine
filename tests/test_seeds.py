@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from streetradar.model import ObservationBatch
 from streetradar.seeds import SAMPLING_STEP, sampling_seeds, seeds_from_parts
 from streetradar.store import PartWriter
 from streetradar.tiles import Tile, TileSource
@@ -32,7 +33,10 @@ def source(bounds: tuple[float, float, float, float] = (5.7, 49.4, 6.6, 50.2)) -
 
 def write_parts(directory: Path, tiles: list[list[Tile]]) -> None:
     """One part per inner list, so cross-part duplicates can be exercised."""
-    writer = PartWriter(directory, provider="apple", run_id="r", capture_precision="second")
+    writer = PartWriter(
+        directory,
+        ObservationBatch(provider="apple", run_id="r", capture_precision="second"),
+    )
     for part in tiles:
         for tile in part:
             writer.batch.add(

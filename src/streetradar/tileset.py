@@ -65,7 +65,9 @@ __all__ = [
     "ZoomStats",
     "build_tileset",
     "inspect_mbtiles",
+    "line_features",
     "observation_features",
+    "read_line_parts",
     "read_parts",
 ]
 
@@ -75,6 +77,7 @@ _PMTILES = "pmtiles"
 #: Coordinates are written to six decimals — about 11 cm. Not false precision:
 #: at zoom 16 a tile is 4096 units across, one unit being roughly 0.15 m, so
 #: fewer decimals would quantise before tippecanoe does.
+_VERTEX = "[{:.6f},{:.6f}]"
 _COORD_FORMAT = '{{"type":"Feature","properties":{{{p}}},"geometry":{{"type":"Point","coordinates":[{x:.6f},{y:.6f}]}}}}\n'
 
 
@@ -185,6 +188,65 @@ def observation_features(batches: Iterable[pa.RecordBatch]) -> Iterator[bytes]:
             _COORD_FORMAT.format(p="" if ym is None else f'"ym":{ym}', x=lon, y=lat)
             for lon, lat, ym in zip(lons, lats, year_months, strict=True)
         ).encode()
+
+
+def read_line_parts(directory: Path) -> Iterator[pa.RecordBatch]:
+    """Stream the coverage-line parts of a run, oldest first."""
+    import pyarrow.parquet as pq
+
+    for path in sorted(directory.glob("*.parquet")):
+        yield from pq.ParquetFile(path).iter_batches(
+            batch_size=100_000,
+            columns=["zoom", "tile_x", "tile_y", "extent", "x", "y", "captured_at"],
+        )
+
+
+def line_features(batches: Iterable[pa.RecordBatch]) -> Iterator[bytes]:
+    """Coverage lines as line-delimited GeoJSON, one blob per batch.
+
+    The stored coordinates are the tile's own, so this is where they become
+    WGS84 — the projection is deferred to exactly one place, and the parts stay
+    at 3.74 bytes per vertex instead of 7.40. See `streetradar.lines`.
+
+    `ym` is written when the provider dated the line. Já and Naver do not, so
+    their features carry no properties at all and the time cursor does not apply
+    to them.
+    """
+    import pyarrow.compute as pc
+
+    from .tiles import Tile, offset_to_wgs84
+
+    for batch in batches:
+        if not batch.num_rows:
+            continue
+        timestamps = batch.column("captured_at")
+        year_months = pc.add(
+            pc.multiply(pc.year(timestamps).cast("int32"), 100),
+            pc.month(timestamps).cast("int32"),
+        ).to_pylist()
+        zooms = batch.column("zoom").to_pylist()
+        tile_xs = batch.column("tile_x").to_pylist()
+        tile_ys = batch.column("tile_y").to_pylist()
+        extents = batch.column("extent").to_pylist()
+        xs = batch.column("x").to_pylist()
+        ys = batch.column("y").to_pylist()
+
+        out: list[str] = []
+        for zoom, tile_x, tile_y, extent, x, y, ym in zip(
+            zooms, tile_xs, tile_ys, extents, xs, ys, year_months, strict=True
+        ):
+            tile = Tile(zoom, tile_x, tile_y)
+            span = float(extent)
+            coords = ",".join(
+                _VERTEX.format(*offset_to_wgs84(tile, float(vx), float(vy), span))
+                for vx, vy in zip(x, y, strict=True)
+            )
+            properties = "" if ym is None else f'"ym":{ym}'
+            out.append(
+                f'{{"type":"Feature","properties":{{{properties}}},'
+                f'"geometry":{{"type":"LineString","coordinates":[{coords}]}}}}\n'
+            )
+        yield "".join(out).encode()
 
 
 def build_tileset(

@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .flood import Direction
-    from .model import CapturePrecision
+    from .model import CapturePrecision, ObservationBatch
     from .store import PartWriter
 
 __all__ = [
@@ -221,7 +221,7 @@ async def collect_coverage(
     source: TileSource,
     *,
     seeds: Iterable[Tile],
-    writer: PartWriter,
+    writer: PartWriter[ObservationBatch],
     state: FloodState,
     limit: int | None = None,
 ) -> AsyncIterator[Path]:

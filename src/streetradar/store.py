@@ -20,14 +20,32 @@ was then unrecoverable.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-from .model import CapturePrecision, ObservationBatch
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
-__all__ = ["PartWriter", "write_part"]
+    from .model import CapturePrecision
+
+__all__ = ["Batch", "PartWriter", "write_part"]
+
+
+class Batch(Protocol):
+    """What a writer needs of whatever it is accumulating.
+
+    Coverage arrives in two shapes — panorama positions from Apple, road lines
+    from Já and Naver — and they do not share a schema. They do share how they
+    are made durable, so the writer knows only this much about them.
+    """
+
+    provider: str
+    run_id: str
+    capture_precision: CapturePrecision
+
+    def __len__(self) -> int: ...
+    def to_arrow(self, *, sort: bool = True) -> pa.Table: ...
+    def clear(self) -> None: ...
+
 
 #: zstd level 9 rather than snappy: measured at 8.0 bytes per row against 17.0,
 #: for compression CPU that is irrelevant next to the available headroom —
@@ -58,34 +76,35 @@ def write_part(table: pa.Table, path: Path) -> Path:
     return path
 
 
-class PartWriter:
+class PartWriter[B: Batch]:
     """Accumulates observations and writes a part once enough have arrived.
 
     Sized by row count rather than bytes: the compressed size of a part is not
-    known until it is written, and at a measured 8 bytes per row the count is a
-    good enough proxy. 20M rows is roughly 160 MB.
+    known until it is written, and at a measured 8 bytes per observation or 16
+    per line the count is a good enough proxy.
+
+    The batch is passed in rather than built here, because what a row *is*
+    differs by provider while making it durable does not. It is generic over the
+    batch so that `writer.batch` keeps the concrete type — the writer needs only
+    the `Batch` protocol, but a caller filling it needs its real `add`.
     """
 
     def __init__(
         self,
         directory: Path,
+        batch: B,
         *,
-        provider: str,
-        run_id: str,
-        capture_precision: CapturePrecision,
         rows_per_part: int = 20_000_000,
     ) -> None:
         if rows_per_part < 1:
             raise ValueError("rows_per_part must be positive")
         self.directory = directory
-        self.provider = provider
-        self.run_id = run_id
+        self.batch: B = batch
+        self.provider = batch.provider
+        self.run_id = batch.run_id
         self.rows_per_part = rows_per_part
         self.parts_written = 0
         self.rows_written = 0
-        self.batch = ObservationBatch(
-            provider=provider, run_id=run_id, capture_precision=capture_precision
-        )
 
     @property
     def pending(self) -> int:
